@@ -36,8 +36,9 @@ from torch_geometric.loader import NeighborLoader
 from torch_geometric.data import Batch
 from scipy.sparse import tril, coo_matrix
 
-from data.loader import get_dataloader, FolderDataset
-from data.matrix_2_graph import graph_to_matrix, matrix_to_graph
+from apps.synthetic import create_dataset
+from apps.data import get_dataloader, FolderDataset
+from apps.data import graph_to_matrix, matrix_to_graph
 
 from neuralif.utils import (
     count_parameters, save_dict_to_file,
@@ -53,98 +54,19 @@ from krylov.gmres import gmres
 # import from self-curated numml file
 # from numml import SparseCSRTensor
 # ## Set GPU
-# In[7]:
-
-
+# In[2]: Device Setting Up
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# In[3]: Data Generation
+n = 10_000
+alpha = 10e-4
 
-# # 2. Dataset generation
+create_dataset(n, 1000, alpha=alpha, mode='train', rs=0, graph=True, solution=True)
+create_dataset(n, 10, alpha=alpha, mode='val', rs=10000, graph=True, solution=True)
+create_dataset(n, 100, alpha=alpha, mode='test', rs=103600, graph=True, solution=True)
 
-# ## Helper functions
-
-# In[8]:
-
-
-def generate_sparse_random(n, alpha=1e-4, random_state=0, sol=False, ood=False):
-    rng = np.random.RandomState(random_state)
-    if alpha is None:
-        alpha = rng.uniform(1e-4, 1e-2)
-    sparsity = 10e-4  # this is 1% sparsity for n = 10 000
-
-    if ood:
-        factor = rng.uniform(0.22, 2.2)
-        sparsity *= factor
-
-    nnz = int(sparsity * n ** 2)
-    rows = [rng.randint(0, n) for _ in range(nnz)]
-    cols = [rng.randint(0, n) for _ in range(nnz)]
-    uniques = set(zip(rows, cols))
-    rows, cols = zip(*uniques)
-    vals = rng.normal(0, 1, size=len(cols))
-
-    M = coo_matrix((vals, (rows, cols)), shape=(n, n))
-    I = scipy.sparse.identity(n)
-    A = (M @ M.T) + alpha * I # create spd matrix
-    print(f"Generated matrix with {100 * (A.nnz / n**2):.2f}% non-zeros ({A.nnz} entries)")
-
-    b = rng.uniform(0, 1, size=n)
-    x = None
-    if sol:
-        x, _ = scipy.sparse.linalg.cg(A, b)
-    return A, x, b
-
-def create_dataset(n, samples, alpha=1e-2, graph=True, rs=0, mode='train', solution=False):
-    if mode != 'train' and rs == 0:
-        raise ValueError('`rs` must be non-zero for val/test to avoid overlap')
-
-    print(f"Creating {samples} samples for '{mode}' set (n={n})")
-    for sam in range(samples):
-        A, x, b = generate_sparse_random(
-            n, alpha=alpha, random_state=rs + sam,
-            sol=solution, ood=(mode == "test_ood")
-        )
-        if graph:
-            g = matrix_to_graph(A, b)
-            if x is not None:
-                g.s = torch.tensor(x, dtype=torch.float)
-            g.n = n
-            torch.save(g, f'./data/Random/{mode}/{n}_{sam}.pt')
-        else:
-            scipy.sparse.save_npz(f'./data/Random/{mode}/{n}_{sam}.npz', A)
-            np.savez(f'./data/Random/{mode}/{n}_{sam}.npz', A=A, b=b, x=x)
-
-
-# ## Create Train, Validation and Test datasets
-
-# In[9]:
-
-
-# ensure target folders exist
-for split in ['train', 'val', 'test']:
-    os.makedirs(f'./data/Random/{split}', exist_ok=True)
-
-# parameters
-n = 10_00
-alpha = 1e-4
-
-# generate
-create_dataset(n, samples=100, alpha=alpha, mode='train', rs=0, graph=True, solution=True)
-create_dataset(n, samples=5, alpha=alpha, mode='val', rs=10000, graph=True, solution=False)
-create_dataset(n, samples=20, alpha=alpha, mode='test', rs=103600, graph=True, solution=False)
-
-
-# # 3. Model
-
-# ## Helper classes and functions
-
-# In[10]:
-
-
-############################
-#          Layers          #
-############################
+# In[4]: Model
 class GraphNet(nn.Module):
     # Follows roughly the outline of torch_geometric.nn.MessagePassing()
     # As shown in https://github.com/deepmind/graph_nets
