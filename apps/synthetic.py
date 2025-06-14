@@ -84,7 +84,7 @@ def create_dataset(n, samples, alpha=1e-4, sparsity: float = 1e-3, graph=True, r
     :return:
     """
     if mode != 'train':
-        warnings('rs must be set for test and val to avoid overlap')
+        warnings.warn('rs must be set for test and val to avoid overlap')
 
     print(f"Generating {samples} samples for the {mode} dataset.")
 
