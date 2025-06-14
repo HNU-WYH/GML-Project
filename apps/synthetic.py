@@ -115,5 +115,5 @@ if __name__ == '__main__':
     alpha=10e-4
     
     create_dataset(n, 1000, alpha=alpha, mode='train', rs=0, graph=True, solution=True)
-    create_dataset(n, 10, alpha=alpha, mode='val', rs=10000, graph=True)
-    create_dataset(n, 100, alpha=alpha, mode='test', rs=103600, graph=True)
+    create_dataset(n, 10, alpha=alpha, mode='val', rs=10000, graph=True, solution=True)
+    create_dataset(n, 100, alpha=alpha, mode='test', rs=103600, graph=True, solution=True)
