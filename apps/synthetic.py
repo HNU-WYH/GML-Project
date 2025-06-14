@@ -105,11 +105,6 @@ def create_dataset(n, samples, alpha=1e-4, sparsity: float = 1e-3, graph=True, r
 
 
 if __name__ == '__main__':
-    # create the folders and subfolders where the data is stored
-    os.makedirs(f'./data/Random/train', exist_ok=True)
-    os.makedirs(f'./data/Random/val', exist_ok=True)
-    os.makedirs(f'./data/Random/test', exist_ok=True)
-    
     # create 10k dataset
     n = 10_000
     alpha=10e-4
