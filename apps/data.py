@@ -1,18 +1,11 @@
-"""
-In the original work, they use the 8 dimensional node feature.
-But I found that the time requires to construct such a graph with 8d node features is more than doing an incomplete cholesky
-Another paper (Li et al) used rhs vector b as the graph signal (node features),
-and even some researchers give up node feature use 1 as the node feature for all nodes.
-I uploaded this two paper to github repo also.
-Thus I think use rhs vector b is enough for our work
-"""
-
-import torch
-import numpy as np
-
+from glob import glob
 from typing import Union
+
+import numpy as np
+import torch
 from scipy.sparse import coo_matrix
 from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
 
 
 def matrix_to_graph_sparse(A: coo_matrix, b: Union[list, np.ndarray]):
@@ -39,6 +32,7 @@ def matrix_to_graph_sparse(A: coo_matrix, b: Union[list, np.ndarray]):
     # edge_index.t().contiguous() transpose and make the content contiguous in memory
     return data
 
+
 def matrix_to_graph(A: np.ndarray, b: Union[list, np.ndarray]):
     """
     similar to matrix_to_graph_sparse(A,b), but for the case when A is in the format of np.ndarray
@@ -60,3 +54,59 @@ def graph_to_matrix(data:Data, normalize=False):
         b = b / torch.linalg.norm(b)
 
     return A, b
+
+
+def get_dataloader(dataset, n=0, batch_size=1, spd=True, mode="train", size=None, graph=True):
+    # Setup datasets
+    
+    if dataset == "random":
+        data = FolderDataset(f"./data/Random/{mode}/", n, size=size, graph=graph)
+    
+    else:
+        raise NotImplementedError("Dataset not implemented, Available: random")
+    
+    # Data Loaders
+    if mode == "train":
+        dataloader = DataLoader(data, batch_size=batch_size, shuffle=True)
+    else:
+        dataloader = DataLoader(data, batch_size=1, shuffle=False)
+    
+    return dataloader
+
+
+class FolderDataset(torch.utils.data.Dataset):
+    def __init__(self, folder, n, graph=True, size=None) -> None:
+        super().__init__()
+        
+        self.graph = True
+        assert self.graph, "Graph keyword is depracated, only graph=True is supported."
+                
+        if n != 0:
+            if self.graph:
+                self.files = list(filter(lambda x: x.split("/")[-1].split('_')[0] == str(n), glob(folder+'*.pt')))
+            else:
+                self.files = list(filter(lambda x: x.split("/")[-1].split('_')[0] == str(n), glob(folder+'*.npz')))
+        else:
+            file_ending = "pt" if self.graph else "npz"
+            self.files = list(glob(folder+f'*.{file_ending}'))
+        
+        if size is not None:
+            assert len(self.files) >= size, f"Only {len(self.files)} files found in {folder} with n={n}"
+            self.files = self.files[:size]
+        
+        if len(self.files) == 0:
+            raise FileNotFoundError(f"No files found in {folder} with n={n}")
+        
+    def __len__(self):
+        return len(self.files)
+    
+    def __getitem__(self, idx):
+        if self.graph:
+            g = torch.load(self.files[idx], weights_only=False)
+        
+        else:
+            # deprecated...
+            d = np.load(self.files[idx], allow_pickle=True)
+            g = matrix_to_graph(d["A"], d["b"])
+        
+        return g

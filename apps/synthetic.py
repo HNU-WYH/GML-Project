@@ -1,36 +1,15 @@
-"""
-Two methods are used in generating the sparse matrices in original work:
-1. A = MM^T + \alpha I
-2. numerical simulation of Poisson Equation (deprecated)
-
-The first one can use different sparsity. However, for the 2nd one, the sparsity is typically very small (less than 0.1%),
-unless using very high order very high order spectral method or discontinuous galerkin, that is hard to implement unless
-we use professional library that will beyond our scope.
-
-But there still are some cases in really that use large dense matrix needed to be solved similar to the 1st case, for example:
-1. for graph regularization, to smooth the graph signal, we need to compute the following minimization problem
-     \|x - y\|^2 + \alpha * x^TLx
-    this is equivalent to compute (L + 1/alpha I) x = y, similar to our data generation A = MM^T + \alpha I
-2. for very old-style rating system, we hava a sparse rating system R (m×n), R_ij represents the rating of user i to item j.
-R_ij is sparse because we only have limited data, we can use the following minimization problem
-    |R - UV^T|^2_F + \lambda_1 |U|^2_F + \lambda_1 |V|^2_F
-    where row i of U represents the feature of user_i, row j of V represents the feature of item_j.
-    we need regularization to make the system invertible and prevents overfitting.
-    the solution can be obtained by alternating least square, for example, fixed U or V and solve the remaining
-        1. (U^T U + \lambda I)v_j = U^T r^j
-        2. (V^T V + \lambda I)u_j = V^T r^j
-
-Thus, we focus only on the first case will be enough and Persuasive.
-"""
+import os
 import numpy as np
-import os, torch, scipy
+import torch
+
+import warnings
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-from debugpy.common.log import warning
+from tqdm import tqdm
 
-from data.matrix_2_graph import matrix_to_graph
+from apps.data import matrix_to_graph
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-# In[]: A = MM^T + \alpha I
 def generate_sparse_random(n: int, alpha: int =1e-4, sparsity: float = 1e-3, random_state: int =0, sol: bool =False, ood: bool =False):
     """
     Generate a sparse SPD linear system A, x, b. The matrix A is generated based on Cholesky decomposition A = MM^T + \alpha I,
@@ -91,8 +70,8 @@ def generate_sparse_random(n: int, alpha: int =1e-4, sparsity: float = 1e-3, ran
 
     return A, x, b
 
-# In[]: Create the denser matrix dataset
-def create_dataset(n, samples, alpha=1e-4, graph=True, rs=0, mode='train', solution=False):
+
+def create_dataset(n, samples, alpha=1e-4, sparsity: float = 1e-3, graph=True, rs=0, mode='train', solution=False):
     """
     generate a batch of linear system, convert into graph data (optional), and save into .npz file or .pt file
     :param n: size of matrix n × n
@@ -105,12 +84,12 @@ def create_dataset(n, samples, alpha=1e-4, graph=True, rs=0, mode='train', solut
     :return:
     """
     if mode != 'train':
-        warning('rs must be set for test and val to avoid overlap')
+        warnings('rs must be set for test and val to avoid overlap')
 
     print(f"Generating {samples} samples for the {mode} dataset.")
 
-    for sam in range(samples):
-        A, x, b = generate_sparse_random(n, random_state=(rs + sam), alpha=alpha, sol=solution,
+    for sam in tqdm(range(samples)):
+        A, x, b = generate_sparse_random(n, random_state=(rs + sam), alpha=alpha, sparsity=sparsity, sol=solution,
                                          ood=(mode == "test_ood"))
         if graph:
             graph = matrix_to_graph(A, b)
@@ -124,14 +103,17 @@ def create_dataset(n, samples, alpha=1e-4, graph=True, rs=0, mode='train', solut
             os.makedirs(f'./dataset/{mode}', exist_ok=True)
             np.savez(f'./dataset/{mode}/{n}_{sam}.npz', A=A, b=b, x=x)
 
-# In[]:
-if __name__ == "__main__":
+
+if __name__ == '__main__':
+    # create the folders and subfolders where the data is stored
+    os.makedirs(f'./data/Random/train', exist_ok=True)
+    os.makedirs(f'./data/Random/val', exist_ok=True)
+    os.makedirs(f'./data/Random/test', exist_ok=True)
+    
+    # create 10k dataset
     n = 10_000
-    alpha = 10e-4
-    # the random seed should [rs, rs+samples] should not overlap with each other to avoid overlapping in dataset
-    create_dataset(n, samples=1000, alpha=alpha, mode='train', rs=0, graph=True, solution=True)
-    create_dataset(n, samples=10, alpha=alpha, mode='val', rs=10000, graph=True)
-    create_dataset(n, samples=100, alpha=alpha, mode='test', rs=103600, graph=True)
-
-
-
+    alpha=10e-4
+    
+    create_dataset(n, 1000, alpha=alpha, mode='train', rs=0, graph=True, solution=True)
+    create_dataset(n, 10, alpha=alpha, mode='val', rs=10000, graph=True)
+    create_dataset(n, 100, alpha=alpha, mode='test', rs=103600, graph=True)
