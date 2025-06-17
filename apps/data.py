@@ -11,6 +11,7 @@ from torch_geometric.loader import DataLoader
 def matrix_to_graph_sparse(A: coo_matrix, b: Union[list, np.ndarray]):
     """
     Convert a sparse matrix A (n×n) in COO Format, and right hand side vector b (n×1) into graph g = (V,E)
+    Here A is a full matrix, not a lower or upper triangular matrix
     where
     - each edge e_ij represents a nonzero entry a_ij in matrix A
     - each node v_i represents the column/row index, the vector entry b_i is used as the node feature (Li et al.)

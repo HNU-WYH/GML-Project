@@ -167,6 +167,12 @@ class MP_Block(nn.Module):
 #         Networks         #
 ############################
 class NeuralPCG(nn.Module):
+    """
+    Similar to NeuralIF, but receive a full graph A with bi-directional edges
+    then edge-level prediction output a full matrix M.  L
+    But M are nonsymmetric, so \tilde M = M + M^T
+    Then M = lower triangular part of L
+    """
     def __init__(self, **kwargs):
         # NeuralPCG follows the Encoder-Process-Decoder architecture
         super().__init__()
@@ -255,6 +261,11 @@ class NeuralPCG(nn.Module):
 
 
 class PreCondNet(nn.Module):
+    """
+    Ablation model:
+    1. compared with NeuralIF, without split into 2 MP blocks, edge_feature_dim = 1
+    2. compared with NeuralPCG, without MLP encoder for node/edge features
+    """
     # BASELINE MODEL
     # No splitting of the matrix into lower and upper part for alignment
     # Used for the ablation study
@@ -506,7 +517,9 @@ class NeuralIF(nn.Module):
 
 
 class LearnedLU(nn.Module):
-    
+    """
+    I will not use this
+    """
     def __init__(self, *args, **kwargs) -> None:
         super().__init__()
         

@@ -14,11 +14,7 @@
 # 
 # **Research direction**: Implement an edge-regression GNN that can work on dense matrices. We can achieve this using sampling techniques such as GraphSAGE and Cluster-GCN.
 
-# # 1. Installation & Setup
-
-# ## Load files from google drive
-
-# In[1]:
+# In[1]: Installation & Setup
 import os
 import datetime
 import pprint
@@ -51,9 +47,8 @@ from neuralif.loss import loss
 from krylov.cg import preconditioned_conjugate_gradient
 from krylov.gmres import gmres
 
-# import from self-curated numml file
-# from numml import SparseCSRTensor
-# ## Set GPU
+from numml.sparse import SparseCSRTensor
+
 # In[2]: Device Setting Up
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -68,16 +63,61 @@ create_dataset(n, 100, alpha=alpha, mode='test', rs=103600, graph=True, solution
 
 # In[4]: Model
 class GraphNet(nn.Module):
-    # Follows roughly the outline of torch_geometric.nn.MessagePassing()
-    # As shown in https://github.com/deepmind/graph_nets
-    # Here is a helpful python implementation:
-    # https://github.com/NVIDIA/GraphQSat/blob/main/gqsat/models.py
-    # Also allows multirgaph GNN via edge_2_features
-    def __init__(self, node_features, edge_features, global_features=0, hidden_size=0,
-                 aggregate="mean", activation="relu", skip_connection=False, edge_features_out=None):
+    """
+    A class of message passing network with the following steps to ypdate our network:
 
+    1. Update the edge feature by MLP
+            (source node, target node, old edge, global info) -> new edge
+    2. Aggregate the edge feature and obtain the message
+            (edge features) -> message to node
+    3. Update the node feature by MLP (old node feature, message) ->
+            (old node feature, message) -> new node feature
+    4. Aggregate and MLP converting all node feature to global feature
+            (all node features) -> global graph feature
+
+    :param node_features: the dimension of node feature (F_n)
+    :param edge_features: the dimension of edge input feature (F_e)
+    :param global_features: the dimension of graph feature, if 0 then no graph feature (F_g)
+    :param hidden_size: the size of hidden layer in MLP (H)
+    :param aggregate: the aggregation method, "sum"/"mean"/"max"/"softmax"
+    :param activation: the activation function
+    :param skip_connection: whether add one extra feature with the original edge feature (matrix entries) before feeding into MLP
+    :param edge_features_out: the dimension of edge output feature, typically the same with input feature (F_e')
+
+    :return:
+    self.aggregate  消息聚合算子 (aggr.Aggregation)
+    self.global_aggregate 全图聚合算子 (MeanAggregation)
+    self.edge_block MLP([F_g + F_e(+1) + 2·F_n , H, F_e'])
+    self.node_block MLP([F_g+ F_e' + F_n, H, F_n])
+    self.global_block MLP([F_n + F_e' + F_g, H, F_g])
+    """
+    def __init__(self,
+                 node_features: int,
+                 edge_features: int,
+                 global_features: int = 0,
+                 hidden_size: int = 0,
+                 aggregate: str = "mean",
+                 activation: str = "relu",
+                 skip_connection: bool =False,
+                 edge_features_out: int =None):
+        """
+        :param node_features: the dimension of node feature (F_n)
+        :param edge_features: the dimension of edge input feature (F_e)
+        :param global_features: the dimension of graph feature, if 0 then no graph feature (F_g)
+        :param hidden_size: the size of hidden layer in MLP (H)
+        :param aggregate: the aggregation method, "sum"/"mean"/"max"/"softmax"
+        :param activation: the activation function
+        :param skip_connection: whether add one extra feature with the original edge feature (matrix entries) before feeding into MLP
+        :param edge_features_out: the dimension of edge output feature, typically the same with input feature (F_e')
+
+        :return:
+        self.aggregate  消息聚合算子 (aggr.Aggregation)
+        self.global_aggregate 全图聚合算子 (MeanAggregation)
+        self.edge_block MLP([F_g + F_e(+1) + 2·F_n , H, F_e'])
+        self.node_block MLP([F_g+ F_e' + F_n, H, F_n])
+        self.global_block MLP([F_n + F_e' + F_g, H, F_g])
+        """
         super().__init__()
-
         # different aggregation functions
         if aggregate == "sum":
             self.aggregate = aggr.SumAggregation()
@@ -115,27 +155,40 @@ class GraphNet(nn.Module):
                                     activation=activation)
 
     def forward(self, x, edge_index, edge_attr, g=None):
-        row, col = edge_index
+        """
+        :param x: (Tensor[N, F_n]) The node features
+        :param edge_index: (LongTensor(2, E)) the edge indices of source & target node
+        :param edge_attr: (Tensor[E, F_e]) the edge features
+        :param g: (Tensor[1, F_g] or None) the global feature
+        :return:
+        edge_embedding: (Tensor[E, F_e′]) Updated Graph Feature
+        node_embeddings: (Tensor[N, F_n]) Updated Node Feature
+        global_embeddings: (Tensor[1, F_g]) Updated Graph Feature
+        """
+
+        row, col = edge_index # row: [E], col: [E]
 
         if self.global_block is not None:
             assert g is not None, "Need global features for global block"
 
             # run the edge update and aggregate features
+            # 1. (global, edge features, node1, node2) -> MLP -> (new_edge)
             edge_embedding = self.edge_block(torch.cat([torch.ones(x[row].shape[0], 1, device=x.device) * g,
                                                         x[row], x[col], edge_attr], dim=1))
+            # 2. edge features -> aggregate -> message
+            # where row denotes which node the edge_embedding should be sent to / destination
             aggregation = self.aggregate(edge_embedding, row)
 
-
+            # 3. (global, node, message) -> MLP -> (new node feature)
             agg_features = torch.cat([torch.ones(x.shape[0], 1, device=x.device) * g, x, aggregation], dim=1)
             node_embeddings = self.node_block(agg_features)
 
-            # aggregate over all edges and nodes (always mean)
+            # 4. all edges ----> aggregate(always mean) -----concat --> MLP ---> new global info
+            #    all nodes ----> aggregate(always mean) -------↑
+            #    old global info ------------------------------↑
             mp_global_aggr = g
             edge_aggregation_global = self.global_aggregate(edge_embedding)
             node_aggregation_global = self.global_aggregate(node_embeddings)
-
-            # compute the new global embedding
-            # the old global feature is part of mp_global_aggr
             global_embeddings = self.global_block(torch.cat([node_aggregation_global,
                                                              edge_aggregation_global,
                                                              mp_global_aggr], dim=1))
@@ -143,20 +196,40 @@ class GraphNet(nn.Module):
             return edge_embedding, node_embeddings, global_embeddings
 
         else:
-            # update edge features and aggregate
+            # 1. update edge features
             edge_embedding = self.edge_block(torch.cat([x[row], x[col], edge_attr], dim=1))
+            # 2. aggregate the edge features
             aggregation = self.aggregate(edge_embedding, row)
+            # 3. update node features
             agg_features = torch.cat([x, aggregation], dim=1)
-            # update node features
             node_embeddings = self.node_block(agg_features)
+
             return edge_embedding, node_embeddings, None
 
 
 class MLP(nn.Module):
-    def __init__(self, width, layer_norm=False, activation="relu", activate_final=False):
+    """
+    Define a MLP Block
+    :param width: a list of all nn layers in the MLP Block
+    :param layer_norm: whether to apply layer normalization
+    :param activation: the activation function in hidden layers
+    :param activate_final: the activation function in the last layer
+    """
+    def __init__(self, width: list, layer_norm: bool =False, activation: str ="relu", activate_final: bool =False):
+        """
+        Define a MLP Block
+        :param width: a list of all nn layers in the MLP Block
+        :param layer_norm: whether to apply layer normalization
+        :param activation: the activation function in hidden layers
+        :param activate_final: the activation function in the last layer
+        """
         super().__init__()
+        # filter(function, iterable) will execute function on iterable
+        # only entries that return True will be kept
+        # avoid have a negative width
         width = list(filter(lambda x: x > 0, width))
         assert len(width) >= 2, "Need at least one layer in the network!"
+
 
         lls = nn.ModuleList()
         for k in range(len(width)-1):
@@ -175,19 +248,46 @@ class MLP(nn.Module):
 
         if layer_norm:
             lls.append(nn.LayerNorm(width[-1]))
-
+            # For GNN, usually each data has different graph size, hence batch norm is seldom used
+            # For CNN, layer norm is used in the case when the batch size is small
         self.m = nn.Sequential(*lls)
 
     def forward(self, x):
         return self.m(x)
 
-
 class MP_Block(nn.Module):
-    # L@L.T matrix multiplication graph layer
-    # Aligns the computation of L@L.T - A with the learned updates
-    def __init__(self, skip_connections, first, last, edge_features, node_features, global_features, hidden_size, **kwargs) -> None:
-        super().__init__()
+    """
+    Stack two layers of GraphNet to enhance symmetry
 
+    :param skip_connections: whether to add the skip
+    :param first: We can stack multiple MP_Blocks, if 1st block, then input_edge_feature_dim = 1,otherwise no restriction
+    :param last: if lats block, then output_edge_feature_dim = 1, otherwise no restriction
+    :param edge_features: edge_feature_dim for hidden blocks
+    :param node_features: node_feature_dim
+    :param global_features: global_feature_dim, if 0 then no global feature
+    :param hidden_size: the width for hidden layer in MLP
+    :param kwargs: (optional) i.e. {"activation":"relu"/"tanh"/..., "aggregate":"sum"/"mean"/...}
+
+    :return:
+    1. self.l1 : the 1st MLP Block for lower triangular matrix (including the diagonal)
+    2. self.l2 : the 2nd MLP Block for upper triangular matrix (including the diagonal)
+    """
+    def __init__(self, skip_connections, first, last, edge_features, node_features, global_features, hidden_size, **kwargs) -> None:
+        """
+        :param skip_connections: whether to add the skip
+        :param first: We can stack multiple MP_Blocks, if 1st block, then input_edge_feature_dim = 1,otherwise no restriction
+        :param last: if lats block, then output_edge_feature_dim = 1, otherwise no restriction
+        :param edge_features: edge_feature_dim for hidden blocks
+        :param node_features: node_feature_dim
+        :param global_features: global_feature_dim, if 0 then no global feature
+        :param hidden_size: the width for hidden layer in MLP
+        :param kwargs: (optional) i.e. {"activation":"relu"/"tanh"/..., "aggregate":"sum"/"mean"/...}
+
+        :return:
+        1. self.l1 : the 1st MLP Block for lower triangular matrix (including the diagonal)
+        2. self.l2 : the 2nd MLP Block for upper triangular matrix (including the diagonal)
+        """
+        super().__init__()
         # first and second aggregation
         if "aggregate" in kwargs and kwargs["aggregate"] is not None:
             aggr = kwargs["aggregate"] if len(kwargs["aggregate"]) == 2 else kwargs["aggregate"] * 2
@@ -199,7 +299,10 @@ class MP_Block(nn.Module):
         edge_features_in = 1 if first else edge_features
         edge_features_out = 1 if last else edge_features
 
-        # We use 2 graph nets in order to operate on the upper and lower triangular parts of the matrix
+        # We use 2 graphnets in order to operate on the upper and lower triangular parts of the matrix
+        # skip_connection=(not first and skip_connections)
+        # if not the first block, then consider skip connection in l1
+        # with the skip connection, we will feed l1 with (new_embeddings, matrix entries)
         self.l1 = GraphNet(node_features=node_features, edge_features=edge_features_in, global_features=global_features,
                            hidden_size=hidden_size, skip_connection=(not first and skip_connections),
                            aggregate=aggr[0], activation=act, edge_features_out=edge_features)
@@ -208,10 +311,23 @@ class MP_Block(nn.Module):
                            hidden_size=hidden_size, aggregate=aggr[1], activation=act, edge_features_out=edge_features_out)
 
     def forward(self, x, edge_index, edge_attr, global_features):
+        """
+        :param x: [N, F_n], the matrix for node features
+        :param edge_index: [2, E], the list of edge indices, with 1st column (target), 2nd column (source)
+        :param edge_attr: [E, F_e_in], the input edge features
+        :param global_features: [1, F_g], None or global feature
+        :return:
+        1. edge embeddings [E, F_e_in]
+        2. node embeddings [N, F_n]
+        3. global graph embeddings [1, F_g]
+        """
+        # The First L1 Block
         edge_embedding, node_embeddings, global_features = self.l1(x, edge_index, edge_attr, g=global_features)
 
-        # flip row and column indices
+        # Flip row and column indices
         edge_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
+
+        # Symmetric L2 Block
         edge_embedding, node_embeddings, global_features = self.l2(node_embeddings, edge_index, edge_embedding, g=global_features)
 
         return edge_embedding, node_embeddings, global_features
@@ -219,33 +335,49 @@ class MP_Block(nn.Module):
 ############################
 #         HELPERS          #
 ############################
-def augment_features(data, skip_rhs=False):
-    # transform nodes to include more features
+def augment_features(data: torch_geometric.data.Data, skip_rhs=False):
+    """
+    Transform nodes to include more features, we only have rhs vector as the node feature,
+    In this step, we augment the node features to 8 dimensional features.
+    As torch_scatter is applied, so the augment_features are much faster than numpy or python-loops
 
+    :param data: including x (node feature), edge_index, edge_attr
+    :param skip_rhs: if true use index, instead of rhs vector entries
+    :return: new data object with augmented data.x features
+    """
     if skip_rhs:
         # use instead notde position as an input feature!
-        data.x = torch.arange(data.x.size()[0], device=data.x.device).unsqueeze(1)
+        data.x = torch.arange(data.x.size()[0], device=data.x.device).unsqueeze(1) # [N,1]
 
-    data = torch_geometric.transforms.LocalDegreeProfile()(data)
+    # Appends the Local Degree Profile (LDP) to the local node features
+    # xi -> |xi, deg(i), min(DN(i)), max(DN(i)), mean(DN(i)),std(DN(i)) |
+    # as torch_scatter is used, so this is very fast
+    data = torch_geometric.transforms.LocalDegreeProfile()(data) # [N, 6]
 
     # diagonal dominance and diagonal decay from the paper
     row, col = data.edge_index
-    diag = (row == col)
-    diag_elem = torch.abs(data.edge_attr[diag])
-    # remove diagonal elements by setting them to zero
-    non_diag_elem = data.edge_attr.clone()
-    non_diag_elem[diag] = 0
 
-    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem), row)
-    alpha = diag_elem / row_sums
-    row_dominance_feature = alpha / (alpha + 1)
-    row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)
+    # find all diagonal/self-loop edge in the edge features [E, 1]
+    diag = (row == col)                                   # [E, 1]
+    diag_elem = torch.abs(data.edge_attr[diag])           # [N, 1]
+
+    # remove diagonal elements by setting them to zero
+    non_diag_elem = data.edge_attr.clone()                # [E, 1]
+    non_diag_elem[diag] = 0                               # [E, 1]
+
+    # compute the dominance as follows:
+    # \alpha_i = |a_ii| / \sum_{j≠i} |a_ij|
+    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem), row)           # [N, 1]
+    alpha = diag_elem / row_sums                                              # [N, 1]
+    row_dominance_feature = alpha / (alpha + 1)                               # [N, 1] mapping dominance to [0,1]
+    row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)  # if row_sums = 0, then dominance = 1
 
     # compute diagonal decay features
-    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem), row)
-    alpha = diag_elem / row_max
-    row_decay_feature = alpha / (alpha + 1)
-    row_decay_feature = torch.nan_to_num(row_decay_feature, nan=1.0)
+    # \alpha_i = \max_{j≠i} |a_ij|
+    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem), row)    # [N, 1]
+    alpha = diag_elem / row_max                                       # [N, 1]
+    row_decay_feature = alpha / (alpha + 1)                           # [N, 1]
+    row_decay_feature = torch.nan_to_num(row_decay_feature, nan=1.0)  # if row_max = 0, then dominance = 1
 
     data.x = torch.cat([data.x, row_dominance_feature, row_decay_feature], dim=1)
 
@@ -253,10 +385,32 @@ def augment_features(data, skip_rhs=False):
 
 
 class ToLowerTriangular(torch_geometric.transforms.BaseTransform):
+    """
+    We have a graph fo a full matrix, the matrix is SPD, so that e_ij = e_ji.
+    But we only requires half of the matrix (including diagonal), there exists redundant nodes,
+    Only maintain those edges with source >= target \n
+
+    torch_geometric.transforms.BaseTransform is a standard class for transformation, where "__call__" function does the
+    following: \n
+    1. data.x : keep the same [N, 1] -> [N ,1]
+    2. data.edge_index : delete edges related to strictly upper triangular [2, E] -> [2, E//2]
+    3. data.edge_attr : delete edges related to strictly upper triangular [E, F] -> [E//2, F]
+
+    :param inplace: whether to modify data inplace
+    """
+
     def __init__(self, inplace=False):
+        """
+        :param inplace: whether to modify data inplace
+        """
         self.inplace = inplace
 
     def __call__(self, data, order=None):
+        """
+        :param data: data need to be modified
+        :param order: Not implemented
+        :return: modified data
+        """
         if not self.inplace:
             data = data.clone()
 
@@ -266,186 +420,71 @@ class ToLowerTriangular(torch_geometric.transforms.BaseTransform):
 
         # transform the data into lower triag graph
         # this should be a data transformation (maybe?)
-        rows, cols = data.edge_index[0], data.edge_index[1]
-        fil = cols <= rows
-        l_index = data.edge_index[:, fil]
-        edge_embedding = data.edge_attr[fil]
+        rows, cols = data.edge_index[0], data.edge_index[1]       # [E, 1]
+        fil = cols <= rows                                        # [E, 1]
+        l_index = data.edge_index[:, fil]                         # [2, E//2], required edge indices
+        edge_embedding = data.edge_attr[fil]                      # [E//2, 1], new edge features
 
-        data.edge_index, data.edge_attr = l_index, edge_embedding
+        data.edge_index, data.edge_attr = l_index, edge_embedding # update/modified the original data
         return data
 
-
-# In[11]:
-
-
-class Preconditioner:
-    def __init__(self, A, **kwargs):
-        self.breakdown = False
-        self.nnz = 0
-        self.time = 0
-        self.n = kwargs.get("n", 0)
-
-    def timed_setup(self, A, **kwargs):
-        start = time_function()
-        self.setup(A, **kwargs)
-        stop = time_function()
-        self.time = stop - start
-
-    def get_inverse(self):
-        ones = torch.ones(self.n)
-        offset = torch.zeros(1).to(torch.int64)
-
-        I = torch.sparse.spdiags(ones, offset, (self.n, self.n))
-        I = I.to(torch.float64)
-
-        return I
-
-    def get_p_matrix(self):
-        return self.get_inverse()
-
-    def check_breakdown(self, P):
-        if np.isnan(np.min(P)):
-            self.breakdown = True
-
-    def __call__(self, x):
-        return x
-
-class LearnedPreconditioner(Preconditioner):
-    def __init__(self, data, model, **kwargs):
-        super().__init__(data, **kwargs)
-
-        self.model = model
-        self.spd = isinstance(model, NeuralIF)
-
-        self.timed_setup(data, **kwargs)
-
-        # # count non‐zeros in a torch Tensor / sparse tensor
-        # def count_nnz(tensor):
-        #     if tensor.layout == torch.sparse_coo:
-        #         # number of nonzero entries in a sparse_coo_tensor
-        #         return int(tensor._values().numel())
-        #     else:
-        #         # dense tensor: count != 0
-        #         return int((tensor != 0).sum().item())
-
-        # if self.spd:
-        #     self.nnz = count_nnz(self.L)
-        # else:
-        #     nnz_L = count_nnz(self.L)
-        #     nnz_U = count_nnz(self.U)
-        #     # subtract the diagonal entries once:
-        #     self.nnz = nnz_L + nnz_U - int(data.x.size(0))
-
-        if self.spd:
-            self.nnz = self.L.nnz
-        else:
-            self.nnz = self.L.nnz + self.U.nnz - data.x.shape[0]
-
-    def setup(self, data, **kwargs):
-        L, U, _ = self.model(data)
-
-        self.L = L.to("cpu").to(torch.float64)
-        self.U = U.to("cpu").to(torch.float64)
-
-    def get_inverse(self):
-        L_inv = torch.inverse(self.L.to_dense())
-        U_inv = torch.inverse(self.U.to_dense())
-
-        return U_inv@L_inv
-
-    def get_p_matrix(self):
-        return self.L@self.U
-
-    def __call__(self, x):
-        return fb_solve(self.L, self.U, x, unit_upper=not self.spd)
-
-
-def fb_solve(L, U, r, unit_lower=False, unit_upper=False):
-    print(L)
-    y = L.solve_triangular(upper=False, unit=unit_lower, b=r)
-    z = U.solve_triangular(upper=True, unit=unit_upper, b=y)
-    return z
-
-time_function = lambda: time.perf_counter()
-
-
-# In[12]:
-
-
-# helper functions
-@torch.no_grad()
-def validate(model, validation_loader, solve=False, solver="cg"):
-    model.eval()
-    acc_loss = 0.0
-    num_loss = 0
-    acc_solver_iters = 0.0
-
-    for data in validation_loader:
-        data = data.to(device)
-        A, b = graph_to_matrix(data)
-
-        if solve:
-            preconditioner = LearnedPreconditioner(data, model)
-            print(preconditioner)
-            A_cpu = A.cpu().double()
-            b_cpu = b.cpu().double()
-            x0 = None
-
-            start = time.time()
-            if solver == "cg":
-                iters, x_hat = preconditioned_conjugate_gradient(
-                    A_cpu, b_cpu, M=preconditioner, x0=x0,
-                    rtol=1e-6, max_iter=1000
-                )
-            else:
-                iters, x_hat = gmres(
-                    A_cpu, b_cpu, M=preconditioner, x0=x0,
-                    atol=1e-6, max_iter=1000, left=False
-                )
-            acc_solver_iters += len(iters) - 1
-        else:
-            output, _, _ = model(data)
-            # l = frobenius_loss(output, A)
-            l = loss(data, output, config="frobenius")
-            acc_loss += l.item()
-            num_loss += 1
-
-    if solve:
-        avg_iters = acc_solver_iters / len(validation_loader)
-        print(f"Validation iterations: {avg_iters:.2f}")
-        return avg_iters
-    else:
-        avg_loss = acc_loss / num_loss
-        print(f"Validation loss: {avg_loss:.4f}")
-        return avg_loss
-
-
-# ## NeuralIF model
-
 # In[13]:
-
-
 class NeuralIF(nn.Module):
-    # Neural Incomplete factorization
+    """
+    Neural Incomplete factorization
+
+    :param drop_tol:  (float) the threshold for non-diagonal entries, if less that drop_tol, set it to be 0 to increase sparsity.
+    :param kwargs: (dict) configs for defining NeuralIF, must include the following:\n
+                    1. global_features (int): dim of global feature, if 0, then no global feature\n
+                    2. latent_size (int): hidden layer size H for MLP\n
+                    3. augment_nodes (bool): \n whether to augment the nodes to 8-dimensional features
+                    4. message_passing_steps (int): number of MP_Block
+                    5. skip_connections (bool): whether to add jump connections
+                    6. activation (str): "relu"/"tanh"/"leakyrelu"/…
+                    7. aggregate (str or list[str]):  ["mean","sum",…]
+                    8. edge_features (int, optional, default=1): dim of edge feature
+                    9. decode_nodes (bool, default=False): whether to add a MLP on the dinal node feature
+                    10. normalize_diag (bool, default=False): this is to conform a_ii = \sum_j (l_{ij})^2
+                    11. graph_norm (bool, default=False): whether to used graph norm, normalize the same feature on all nodes
+                    12. two_hop (bool, default=False): whether consider 2-hop neighbors
+    """
     def __init__(self, drop_tol=0, **kwargs) -> None:
+
         super().__init__()
 
+        # node. global, edge feature dims in the latent layers
+        edge_features = kwargs.get("edge_features", 1)
         self.global_features = kwargs["global_features"]
         self.latent_size = kwargs["latent_size"]
-        # node features are augmented with local degree profile
-        self.augment_node_features = kwargs["augment_nodes"]
-
+        self.augment_node_features = kwargs["augment_nodes"] # node features are augmented with local degree profile
         num_node_features = 8 if self.augment_node_features else 1
+
+        # num of MP_Blocks
         message_passing_steps = kwargs["message_passing_steps"]
 
-        # edge feature representation in the latent layers
-        edge_features = kwargs.get("edge_features", 1)
-
+        # whether to concat original features with intermediate edge features
         self.skip_connections = kwargs["skip_connections"]
 
+        # drop tolerance and additional fill-ins and more sparsity
+        self.tau = drop_tol
+        self.two = kwargs.get("two_hop", False)
+
+        # MLP node decoder for node features in last layer, if kwargs["decode_nodes"] is True
+        self.node_decoder = MLP([num_node_features, self.latent_size, 1]) if kwargs["decode_nodes"] else None
+
+        # normalization
+        self.graph_norm = pyg.norm.GraphNorm(num_node_features) if (
+                    "graph_norm" in kwargs and kwargs["graph_norm"]) else None
+
+        # diag-aggregation for normalization of rows
+        self.normalize_diag = kwargs["normalize_diag"] if "normalize_diag" in kwargs else False
+        self.diag_aggregate = aggr.SumAggregation() # used for compute \sum_j (L_{ij})^2
+
+        # stack multiple MP_Blocks (each MP_Blocks includes 2 GraphNet for upper and lower triangular matrix)
         self.mps = torch.nn.ModuleList()
-        for l in range(message_passing_steps):
+        for l in range(message_passing_steps): # number of MP_Block
             # skip connections are added to all layers except the first one
+            # as the input of first layer is the original feature
             self.mps.append(MP_Block(skip_connections=self.skip_connections,
                                      first=l==0,
                                      last=l==(message_passing_steps-1),
@@ -456,44 +495,34 @@ class NeuralIF(nn.Module):
                                      activation=kwargs["activation"],
                                      aggregate=kwargs["aggregate"]))
 
-        # node decodings
-        self.node_decoder = MLP([num_node_features, self.latent_size, 1]) if kwargs["decode_nodes"] else None
-
-        # diag-aggregation for normalization of rows
-        self.normalize_diag = kwargs["normalize_diag"] if "normalize_diag" in kwargs else False
-        self.diag_aggregate = aggr.SumAggregation()
-
-        # normalization
-        self.graph_norm = pyg.norm.GraphNorm(num_node_features) if ("graph_norm" in kwargs and kwargs["graph_norm"]) else None
-
-        # drop tolerance and additional fill-ins and more sparsity
-        self.tau = drop_tol
-        self.two = kwargs.get("two_hop", False)
-
     def forward(self, data):
-        # ! data could be batched here...(not implemented)
+        #TODO ! data could be batched here...(not implemented)
 
+        # Augment the node feature to 8-dim in the paper
         if self.augment_node_features:
             data = augment_features(data, skip_rhs=True)
 
         # add additional edges to the data
-        if self.two:
-            data = TwoHop()(data)
+        # let the preconditioner has the same sparsity patterm with A^2
+        if self.two: # the 2-hop neighbors are regarded as new neighbors with edge_attr = 0
+            data = TwoHop()(data) # TwoHop is defined in neuralif.utils.py
 
-        # * in principle it is possible to integrate reordering here.
+        #TODO in principle it is possible to integrate reordering here.
+        #Not Implemented here, so we just ignore the reordering
 
+        # transform the coates graph of SPD matrix into graph data of lower triangular matrix
         data = ToLowerTriangular()(data)
 
-        # get the input data
+        # get the input data (edge_attr, node_attr, edge_index, graph_attr)
         edge_embedding = data.edge_attr
         l_index = data.edge_index
-
         if self.graph_norm is not None:
             node_embedding = self.graph_norm(data.x, batch=data.batch)
         else:
             node_embedding = data.x
 
         # copy the input data (only edges of original matrix A)
+        # for concatenation in the skip connection
         a_edges = edge_embedding.clone()
 
         if self.global_features > 0:
@@ -502,10 +531,10 @@ class NeuralIF(nn.Module):
         else:
             global_features = None
 
-        # compute the output of the network
+        # compute the output of the network,
         for i, layer in enumerate(self.mps):
             if i != 0 and self.skip_connections:
-                edge_embedding = torch.cat([edge_embedding, a_edges], dim=1)
+                edge_embedding = torch.cat([edge_embedding, a_edges], dim=1) # concat the original matrix entry to the edge feature in the intermediate layer
 
             edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
 
@@ -513,10 +542,29 @@ class NeuralIF(nn.Module):
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
 
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
+        """
+        Transfer the graph data of the outputs of MP_Blocks into factors L & U, and node outputs
+        :param node_x: node embeddings in the last layer [N, F_n]
+        :param edge_index: edge indices denoting source and target [2, N]
+        :param edge_values: edge features in the last layer [N, ]
+        :param a_edges: non-zero entries in a sorted by the ordering of edge_index[N,]
+        :return:
+        (Ⅰ). For inference:
+            1. l：lower triangular matrix in csr format
+            2. u: upper triangular matrix in csr format
+            3. node_output: optional, can be None
+
+        (Ⅱ). For training:
+            1. t：a spare matrix with the size [N,N] in coo format
+            2. l1_penalty: l1 norm of nnz entries in t
+            3. node_output: optional, can be None
+        """
         # force diagonal to be positive
+        # mask for diagonal entries
         diag = edge_index[0] == edge_index[1]
 
-        # normalize diag such that it has zero residual
+        # normalize diag such that it has zero residual if self.normalize_diag is true
+        # otherwise just make diag to be positive
         if self.normalize_diag:
             # copy the diag of matrix A
             a_diag = a_edges[diag]
@@ -538,9 +586,10 @@ class NeuralIF(nn.Module):
         node_output = self.node_decoder(node_x).squeeze() if self.node_decoder is not None else None
 
         # ! this if should only be activated when the model is in production!!
+        # @torch.inference_mode() or with torch.inference_mode(), we will have torch.is_inference_mode_enabled() == True
         if torch.is_inference_mode_enabled():
-
             # we can decide to remove small elements during inference from the preconditioner matrix
+            # delete small entries in the preconditioner, when they are less than self.tau
             if self.tau != 0:
                 small_value = (torch.abs(edge_values) <= self.tau).squeeze()
 
@@ -584,14 +633,219 @@ class NeuralIF(nn.Module):
 
             return t, l1_penalty, node_output
 
+# In[11]:
+time_function = lambda: time.perf_counter()
 
-# # 4. Training
+class Preconditioner:
+    """
+    General Preconditioner Class
+    """
+    def __init__(self, A, **kwargs):
+        """
+        :param A: the matrix for constructing the preconditioners
+        :param kwargs: {"n": size (int, optional)}
+        """
+        self.breakdown = False        # whether there exists Nan
+        self.nnz = 0                  # num of non-zero entries
+        self.time = 0                 # elapsed time for constructing preconditioners
+        self.n = kwargs.get("n", 0)   # the size of matrix A
 
-# ## Set Training Configuration
+    def timed_setup(self, A, **kwargs):
+        """
+        the setup method and records the time for constructing preconditioners
+        :param A: the matrix A for constructing the preconditioners
+        :param kwargs: other parameters for setup
+        """
+        start = time_function()
+        self.setup(A, **kwargs)
+        stop = time_function()
+        self.time = stop - start
+
+    def check_breakdown(self, P):
+        """
+        If there exists NaN in P，then set self.breakdown = True
+        """
+        if np.isnan(np.min(P)):
+            self.breakdown = True
+
+    def get_inverse(self):
+        """
+        virtual function here
+        """
+        ones = torch.ones(self.n)
+        offset = torch.zeros(1).to(torch.int64)
+
+        I = torch.sparse.spdiags(ones, offset, (self.n, self.n))
+        I = I.to(torch.float64)
+
+        return I
+
+    def get_p_matrix(self):
+        """
+        virtual function here
+        """
+        return self.get_inverse()
+
+    def __call__(self, x):
+        """
+        virtual function here
+        """
+        return x
+
+class LearnedPreconditioner(Preconditioner):
+    """
+    Subclass of pre-conditioner, when initialize the class, we compute the L and U factors by running NeuralIF on the input graph \n
+
+    We can use the class like a function by ""__call__", which solves the preconditioner P = LU as follows:\n
+
+    Pz = x ---> z = P^{-1}x = U^{-1}L^{-1}x
+    """
+    def __init__(self, data, model: NeuralIF, **kwargs):
+        """
+        Inherits from Preconditioner, , overriding setup, inverse, and apply methods.\n
+        When initialize the class, we compute the L and U factors by running NeuralIF on the input graph \n
+        We can use the class like a function by ""__call__", which solves the preconditioner P = LU as follows:\n
+        Pz = x ---> z = P^{-1}x = U^{-1}L^{-1}x \n
+        :param data: the data object containing the adjacent graph and features
+        :param model: GNN forwards the data object and outputs (L, U)
+        :param kwargs: {"n" : (int, optional) size}
+        """
+        super().__init__(data, **kwargs)
+
+        # receive & store the GNN model (NeuralIF)
+        self.model = model
+        self.spd = isinstance(model, NeuralIF)
+
+        # constructing the preconditioners and records the required time
+        # the timed_setup function will produce the lower triangular preconditioner L
+        self.timed_setup(data, **kwargs)
+
+        # Count non-zero entris of L. If SPD, we will only have L
+        if self.spd:
+            self.nnz = self.L.nnz
+        else:
+            self.nnz = self.L.nnz + self.U.nnz - data.x.shape[0]
+
+    def setup(self, data, **kwargs):
+        """
+        Compute the L and U factors by running NeuralIF on the input graph
+        Then move the results L & U to CPUs for numerical solvers
+        :param data: graph dara passed to the model
+        :param kwargs: not used here
+        :return:
+        1. self.L CPU float64 tensors of lower triangular matrix [n, n]
+        2. self.U CPU float64 tensors of lower triangular matrix [n, n]
+        """
+        L, U, _ = self.model(data)
+
+        self.L = L.to("cpu").to(torch.float64)
+        self.U = U.to("cpu").to(torch.float64)
+
+    def get_inverse(self):
+        """
+        Compute and return the explicit inverse of the learned factors.
+        :return: Tensor[n, n]: The product U^{-1} @ L^{-1}, i.e. (LU)^{-1}.
+        """
+        L_inv = torch.inverse(self.L.to_dense()) # [n, n]
+        U_inv = torch.inverse(self.U.to_dense()) # [n, n]
+
+        return U_inv@L_inv
+
+    def get_p_matrix(self):
+        """
+        Return the explicit preconditioner matrix P = L @ U.
+        :return: Tensor[n, n]: The learned preconditioning matrix LU.
+        """
+        return self.L@self.U
+
+    def __call__(self, x):
+        """
+        Apply the learned preconditioner to a right-hand side vector or matrix.
+        :param x (Tensor[n] or Tensor[n, k]): The vector (or batch of vectors) to precondition.
+        :return: Tensor[n] or Tensor[n, k]: The result z = (LU)^{-1} x, computed via forward/backward substitution.
+        """
+        return fb_solve(self.L, self.U, x, unit_upper=not self.spd)
+
+
+def fb_solve(L, U, r, unit_lower=False, unit_upper=False):
+    """
+    Forward & Backward Substitution Method
+    :param L: [n,n] Lower Triangular Matrix
+    :param U: [n,n] Upper Triangular Matrix
+    :param r: [n,k] The RHS Vector\Matrix
+    :param unit_lower: If True, the diagonal elements of matrix L are all 1
+    :param unit_upper: If True, the diagonal elements of matrix U are all 1
+    :return: Z: [n,k] Solution Tensor such that z = (LU)^{-1}r
+    """
+    # print(L) # print L if required
+    y = L.solve_triangular(upper=False, unit=unit_lower, b=r)    # y = L^{-1}r
+    z = U.solve_triangular(upper=True, unit=unit_upper, b=y)     # z = U^{-1}y
+    return z
+
+# In[12]:
+
+# helper functions
+@torch.no_grad()
+def validate(model, validation_loader, solve=False, solver="cg"):
+    """
+    Evaluate the model on validation set.
+    1. If solve = False, then compute the Frobenius norm of preconditioner and A.
+    2. If solve = True, then compute the average iterations  of CG.
+    :param model: The trained NeuralIF model
+    :param validation_loader: The Dataloader
+    :param solve: bool, True or False, whether compute F_norm or iterations
+    :param solver: "cg" or "gmres"
+    :return: average F_norm or iteration numbers
+    """
+    model.eval()
+    acc_loss = 0.0
+    num_loss = 0
+    acc_solver_iters = 0.0
+
+    for data in validation_loader:
+        data = data.to(device)
+        A, b = graph_to_matrix(data)
+
+        if solve:
+            preconditioner = LearnedPreconditioner(data, model)
+            print(preconditioner)
+            A_cpu = A.cpu().double()
+            b_cpu = b.cpu().double()
+            x0 = None
+
+            start = time.time()
+            if solver == "cg":
+                iters, x_hat = preconditioned_conjugate_gradient(
+                    A_cpu, b_cpu, M=preconditioner, x0=x0,
+                    rtol=1e-6, max_iter=1000
+                )
+            else:
+                iters, x_hat = gmres(
+                    A_cpu, b_cpu, M=preconditioner, x0=x0,
+                    atol=1e-6, max_iter=1000, left=False
+                )
+            acc_solver_iters += len(iters) - 1
+        else:
+            """
+            Here model is NeuralIF, the outputs are the matrix L, we compute the loss
+                \| LL^T - A \|^2_F
+            """
+            output, _, _ = model(data)
+            # l = frobenius_loss(output, A)
+            l = loss(data, output, config="frobenius")
+            acc_loss += l.item()
+            num_loss += 1
+
+    if solve:
+        avg_iters = acc_solver_iters / len(validation_loader)
+        print(f"Validation iterations: {avg_iters:.2f}")
+        return avg_iters
+    else:
+        avg_loss = acc_loss / num_loss
+        print(f"Validation loss: {avg_loss:.4f}")
+        return avg_loss
 
 # In[14]:
-
-
 config = {
     "name": "experiment_1",
     "save": True,
