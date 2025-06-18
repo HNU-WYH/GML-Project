@@ -35,7 +35,7 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
     num_loss = 0
     acc_solver_iters = 0.0
 
-    for i, data in enumerate(validation_loader):
+    for i, data in enumerate(tqdm(validation_loader, desc="Validation",  total = len(validation_loader))):
         data = data.to(device)
         # construct problem data
         A, b = graph_to_matrix(data)
