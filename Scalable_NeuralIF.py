@@ -782,72 +782,70 @@ def fb_solve(L, U, r, unit_lower=False, unit_upper=False):
     z = U.solve_triangular(upper=True, unit=unit_upper, b=y)     # z = U^{-1}y
     return z
 
-# In[12]:
-
-# helper functions
-@torch.no_grad()
-def validate(model, validation_loader, solve=False, solver="cg"):
-    """
-    Evaluate the model on validation set.
-    1. If solve = False, then compute the Frobenius norm of preconditioner and A.
-    2. If solve = True, then compute the average iterations  of CG.
-    :param model: The trained NeuralIF model
-    :param validation_loader: The Dataloader
-    :param solve: bool, True or False, whether compute F_norm or iterations
-    :param solver: "cg" or "gmres"
-    :return: average F_norm or iteration numbers
-    """
-    model.eval()
-    acc_loss = 0.0
-    num_loss = 0
-    acc_solver_iters = 0.0
-
-    for data in validation_loader:
-        data = data.to(device)
-        A, b = graph_to_matrix(data)
-
-        if solve:
-            preconditioner = LearnedPreconditioner(data, model)
-            print(preconditioner)
-            A_cpu = A.cpu().double()
-            b_cpu = b.cpu().double()
-            x0 = None
-
-            start = time.time()
-            if solver == "cg":
-                iters, x_hat = preconditioned_conjugate_gradient(
-                    A_cpu, b_cpu, M=preconditioner, x0=x0,
-                    rtol=1e-6, max_iter=1000
-                )
-            else:
-                iters, x_hat = gmres(
-                    A_cpu, b_cpu, M=preconditioner, x0=x0,
-                    atol=1e-6, max_iter=1000, left=False
-                )
-            acc_solver_iters += len(iters) - 1
-        else:
-            """
-            Here model is NeuralIF, the outputs are the matrix L, we compute the loss
-                \| LL^T - A \|^2_F
-            """
-            output, _, _ = model(data)
-            # l = frobenius_loss(output, A)
-            l = loss(data, output, config="frobenius")
-            acc_loss += l.item()
-            num_loss += 1
-
-    if solve:
-        avg_iters = acc_solver_iters / len(validation_loader)
-        print(f"Validation iterations: {avg_iters:.2f}")
-        return avg_iters
-    else:
-        avg_loss = acc_loss / num_loss
-        print(f"Validation loss: {avg_loss:.4f}")
-        return avg_loss
+# # helper functions
+# @torch.no_grad()
+# def validate(model, validation_loader, solve=False, solver="cg"):
+#     """
+#     Evaluate the model on validation set.
+#     1. If solve = False, then compute the Frobenius norm of preconditioner and A.
+#     2. If solve = True, then compute the average iterations  of CG.
+#     :param model: The trained NeuralIF model
+#     :param validation_loader: The Dataloader
+#     :param solve: bool, True or False, whether compute F_norm or iterations
+#     :param solver: "cg" or "gmres"
+#     :return: average F_norm or iteration numbers
+#     """
+#     model.eval()
+#     acc_loss = 0.0
+#     num_loss = 0
+#     acc_solver_iters = 0.0
+#
+#     for data in validation_loader:
+#         data = data.to(device)
+#         A, b = graph_to_matrix(data)
+#
+#         if solve:
+#             preconditioner = LearnedPreconditioner(data, model)
+#             print(preconditioner)
+#             A_cpu = A.cpu().double()
+#             b_cpu = b.cpu().double()
+#             x0 = None
+#
+#             start = time.time()
+#             if solver == "cg":
+#                 iters, x_hat = preconditioned_conjugate_gradient(
+#                     A_cpu, b_cpu, M=preconditioner, x0=x0,
+#                     rtol=1e-6, max_iter=1000
+#                 )
+#             else:
+#                 iters, x_hat = gmres(
+#                     A_cpu, b_cpu, M=preconditioner, x0=x0,
+#                     atol=1e-6, max_iter=1000, left=False
+#                 )
+#             acc_solver_iters += len(iters) - 1
+#         else:
+#             """
+#             Here model is NeuralIF, the outputs are the matrix L, we compute the loss
+#                 \| LL^T - A \|^2_F
+#             """
+#             output, _, _ = model(data)
+#             # l = frobenius_loss(output, A)
+#             l = loss(data, output, config="frobenius")
+#             acc_loss += l.item()
+#             num_loss += 1
+#
+#     if solve:
+#         avg_iters = acc_solver_iters / len(validation_loader)
+#         print(f"Validation iterations: {avg_iters:.2f}")
+#         return avg_iters
+#     else:
+#         avg_loss = acc_loss / num_loss
+#         print(f"Validation loss: {avg_loss:.4f}")
+#         return avg_loss
 
 # In[14]:
 config = {
-    "name": "experiment_1",
+    "name": "experiment_train",
     "save": True,
     "seed": 42,
     "n": 0,
@@ -872,8 +870,12 @@ config = {
     "edge_features": 1,
     "graph_norm": False,
     "two_hop": False,
-    "num_neighbors": [15, 10]  # number of neighbours to sample in each hop (GraphSAGE sampling)
+    "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
+    "device": "cpu"
 }
+
+device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+config[device] = device
 
 # Prepare output folder
 if config["name"]:
@@ -886,8 +888,6 @@ if config["save"]:
 
 
 # In[16]:
-
-
 # Seed for reproducibility
 torch_geometric.seed_everything(config["seed"])
 
@@ -920,181 +920,181 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 # Dataloader using NeighborSampler (GraphSAGE-inspired)
 # - Random sampling of nodes at each layer to form a node's local neighbourhood
 
-# In[17]:
-
-
-from torch_geometric.loader import NeighborSampler
-from torch.utils.data import IterableDataset
-from torch_geometric.data import Data
-from torch.utils.data import DataLoader
-import torch_sparse, torch_scatter
-
-# get list of all files from directory in .pt format. each file represents 1 graph
-train_dataset = FolderDataset(f"./data/Random/train/", n=config["n"], graph=True, size=None)
-train_graphs   = [torch.load(path, weights_only=False) for path in train_dataset.files]
-big_train_data = Batch.from_data_list(train_graphs)
-
-# transform each sampler batch into a Data object
-def to_data(batch_size, n_id, adjs):
-    # Collect the node features for all participating nodes:
-    x_sub = big_train_data.x[n_id]
-
-    # Gather edges & edge‐attrs from each hop:
-    rows, cols, eids = [], [], []
-    for edge_index, e_id, size in adjs:
-        rows.append(edge_index[0])
-        cols.append(edge_index[1])
-        eids.append(e_id)
-    row = torch.cat(rows, dim=0)
-    col = torch.cat(cols, dim=0)
-    eid = torch.cat(eids, dim=0)
-
-    edge_index_sub = torch.stack([row, col], dim=0)
-    edge_attr_sub  = big_train_data.edge_attr[eid]
-
-    data = Data(
-        x          = x_sub,
-        edge_index = edge_index_sub,
-        edge_attr  = edge_attr_sub,
-    )
-    data.n = x_sub.size(0)            # if your model reads data.n
-    return data
-
-# build neighbour sampler while transforming all training entries to the Data object
-train_loader = NeighborSampler(               # implementation of abstract class DataLoader
-    edge_index   = big_train_data.edge_index,
-    sizes        = config["num_neighbors"],
-    node_idx     = None,                      # sample seeds from all nodes
-    num_nodes    = big_train_data.num_nodes,
-    return_e_id  = True,                      # we need the e_id to slice edge_attr
-    transform    = to_data,                   # turn each sample into Data
-    batch_size   = config["batch_size"],      # # of seeds per iteration
-    shuffle      = True,
-    num_workers  = 4,
-    pin_memory   = True,
-)
-
-first_sample = next(iter(train_loader))
-print(type(first_sample))    # torch_geometric.data.Data
-print(first_sample)          # Data object with format x, edge_index, edge_attr, n, etc.
-print(len(train_loader))
-
-# load the full graph for the validation dataloader
-validation_loader = get_dataloader(config["dataset"], config["n"], batch_size=1, spd=(not gmres), mode="val")
-
-
-# Dataloader for full graph (Original dataloader)
-
-# In[19]:
-
-
-# 1. retrieve the FolderDataset object for each of train and validation loader based on .pt files
-# 2. pass the FolderDataset object into torch.util's DataLoader as the dataset field
-# 3. return this DataLoader object
-
-# the loader below passes train_dataset directly to torch.util's DataLoader class
-
-train_loader = get_dataloader(config["dataset"], config["n"], config["batch_size"],
-                                  spd=not gmres, mode="train")
-
-print(train_loader.dataset[0])
-print(len(train_loader))
-
-validation_loader = get_dataloader(config["dataset"], config["n"], 1, spd=(not gmres), mode="val")
-
-
-# ## Training Loop
-
-# In[20]:
-
-
-from torch_geometric.utils import add_self_loops
-
-
-# training loop
-best_val = float("inf")
-logger = TrainResults(folder)
-total_it = 0
-
-for epoch in range(config["num_epochs"]):
-    running_loss = 0.0
-    start_epoch = time.perf_counter()
-
-    for data in train_loader:
-        total_it += 1
-        model.train()
-
-        start = time.perf_counter()
-        data = data.to(device)
-
-        ### resolving the unmatching dimension bug for NeighborSampler class
-        # 1) override n properly
-        data.n = int(data.x.size(0))
-
-        # 2) add self-loops so each node has at least one incoming edge
-        data.edge_index, data.edge_attr = add_self_loops(
-            data.edge_index,
-            data.edge_attr,
-            fill_value=0.0,
-            num_nodes=data.n
-        )
-        ###
-
-        # print(f"Input training data to the model is {data}")
-        output, reg, _ = model(data)
-        # print(f"Output from the model is {output} and reg term is {reg}")
-
-        l = loss(output, data, c=reg, config=config["loss"])
-        l.backward()
-
-        # gradient clipping or manual norm
-        if config["gradient_clipping"]:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), config["gradient_clipping"]
-            )
-        else:
-            total_norm = sum(
-                p.grad.detach().data.norm(2).item() ** 2
-                for p in model.parameters() if p.grad is not None
-            )
-            grad_norm = (total_norm ** 0.5) / config["batch_size"]
-
-        optimizer.step()
-        optimizer.zero_grad()
-
-        running_loss += l.item()
-        logger.log(l.item(), grad_norm, time.perf_counter() - start)
-
-        # periodic validation
-        if total_it % 1000 == 0:
-            val_metric = validate(
-                model, validation_loader, solve=True,
-                solver="gmres" if use_gmres else "cg"
-            )
-            logger.log_val(None, val_metric)
-            if val_metric < best_val:
-                best_val = val_metric
-                if config["save"]:
-                    torch.save(model.state_dict(), f"{folder}/best_model.pt")
-
-    epoch_time = time.perf_counter() - start_epoch
-    print(f"Epoch {epoch+1} — loss: {running_loss/len(train_loader):.4f}, time: {epoch_time:.1f}s")
-    if config["save"]:
-        torch.save(model.state_dict(), f"{folder}/model_epoch{epoch+1}.pt")
-
-
-# In[33]:
-
-
-# save results
-if config["save"]:
-    logger.save_results()
-    torch.save(model.to(torch.float).state_dict(), f"{folder}/final_model.pt")
-
-
-# In[ ]:
-
-
-# test printout
-print("Best validation performance:", best_val)
+# # In[17]:
+#
+#
+# from torch_geometric.loader import NeighborSampler
+# from torch.utils.data import IterableDataset
+# from torch_geometric.data import Data
+# from torch.utils.data import DataLoader
+# import torch_sparse, torch_scatter
+#
+# # get list of all files from directory in .pt format. each file represents 1 graph
+# train_dataset = FolderDataset(f"./data/Random/train/", n=config["n"], graph=True, size=None)
+# train_graphs   = [torch.load(path, weights_only=False) for path in train_dataset.files]
+# big_train_data = Batch.from_data_list(train_graphs)
+#
+# # transform each sampler batch into a Data object
+# def to_data(batch_size, n_id, adjs):
+#     # Collect the node features for all participating nodes:
+#     x_sub = big_train_data.x[n_id]
+#
+#     # Gather edges & edge‐attrs from each hop:
+#     rows, cols, eids = [], [], []
+#     for edge_index, e_id, size in adjs:
+#         rows.append(edge_index[0])
+#         cols.append(edge_index[1])
+#         eids.append(e_id)
+#     row = torch.cat(rows, dim=0)
+#     col = torch.cat(cols, dim=0)
+#     eid = torch.cat(eids, dim=0)
+#
+#     edge_index_sub = torch.stack([row, col], dim=0)
+#     edge_attr_sub  = big_train_data.edge_attr[eid]
+#
+#     data = Data(
+#         x          = x_sub,
+#         edge_index = edge_index_sub,
+#         edge_attr  = edge_attr_sub,
+#     )
+#     data.n = x_sub.size(0)            # if your model reads data.n
+#     return data
+#
+# # build neighbour sampler while transforming all training entries to the Data object
+# train_loader = NeighborSampler(               # implementation of abstract class DataLoader
+#     edge_index   = big_train_data.edge_index,
+#     sizes        = config["num_neighbors"],
+#     node_idx     = None,                      # sample seeds from all nodes
+#     num_nodes    = big_train_data.num_nodes,
+#     return_e_id  = True,                      # we need the e_id to slice edge_attr
+#     transform    = to_data,                   # turn each sample into Data
+#     batch_size   = config["batch_size"],      # # of seeds per iteration
+#     shuffle      = True,
+#     num_workers  = 4,
+#     pin_memory   = True,
+# )
+#
+# first_sample = next(iter(train_loader))
+# print(type(first_sample))    # torch_geometric.data.Data
+# print(first_sample)          # Data object with format x, edge_index, edge_attr, n, etc.
+# print(len(train_loader))
+#
+# # load the full graph for the validation dataloader
+# validation_loader = get_dataloader(config["dataset"], config["n"], batch_size=1, spd=(not gmres), mode="val")
+#
+#
+# # Dataloader for full graph (Original dataloader)
+#
+# # In[19]:
+#
+#
+# # 1. retrieve the FolderDataset object for each of train and validation loader based on .pt files
+# # 2. pass the FolderDataset object into torch.util's DataLoader as the dataset field
+# # 3. return this DataLoader object
+#
+# # the loader below passes train_dataset directly to torch.util's DataLoader class
+#
+# train_loader = get_dataloader(config["dataset"], config["n"], config["batch_size"],
+#                                   spd=not gmres, mode="train")
+#
+# print(train_loader.dataset[0])
+# print(len(train_loader))
+#
+# validation_loader = get_dataloader(config["dataset"], config["n"], 1, spd=(not gmres), mode="val")
+#
+#
+# # ## Training Loop
+#
+# # In[20]:
+#
+#
+# from torch_geometric.utils import add_self_loops
+#
+#
+# # training loop
+# best_val = float("inf")
+# logger = TrainResults(folder)
+# total_it = 0
+#
+# for epoch in range(config["num_epochs"]):
+#     running_loss = 0.0
+#     start_epoch = time.perf_counter()
+#
+#     for data in train_loader:
+#         total_it += 1
+#         model.train()
+#
+#         start = time.perf_counter()
+#         data = data.to(device)
+#
+#         ### resolving the unmatching dimension bug for NeighborSampler class
+#         # 1) override n properly
+#         data.n = int(data.x.size(0))
+#
+#         # 2) add self-loops so each node has at least one incoming edge
+#         data.edge_index, data.edge_attr = add_self_loops(
+#             data.edge_index,
+#             data.edge_attr,
+#             fill_value=0.0,
+#             num_nodes=data.n
+#         )
+#         ###
+#
+#         # print(f"Input training data to the model is {data}")
+#         output, reg, _ = model(data)
+#         # print(f"Output from the model is {output} and reg term is {reg}")
+#
+#         l = loss(output, data, c=reg, config=config["loss"])
+#         l.backward()
+#
+#         # gradient clipping or manual norm
+#         if config["gradient_clipping"]:
+#             grad_norm = torch.nn.utils.clip_grad_norm_(
+#                 model.parameters(), config["gradient_clipping"]
+#             )
+#         else:
+#             total_norm = sum(
+#                 p.grad.detach().data.norm(2).item() ** 2
+#                 for p in model.parameters() if p.grad is not None
+#             )
+#             grad_norm = (total_norm ** 0.5) / config["batch_size"]
+#
+#         optimizer.step()
+#         optimizer.zero_grad()
+#
+#         running_loss += l.item()
+#         logger.log(l.item(), grad_norm, time.perf_counter() - start)
+#
+#         # periodic validation
+#         if total_it % 1000 == 0:
+#             val_metric = validate(
+#                 model, validation_loader, solve=True,
+#                 solver="gmres" if use_gmres else "cg"
+#             )
+#             logger.log_val(None, val_metric)
+#             if val_metric < best_val:
+#                 best_val = val_metric
+#                 if config["save"]:
+#                     torch.save(model.state_dict(), f"{folder}/best_model.pt")
+#
+#     epoch_time = time.perf_counter() - start_epoch
+#     print(f"Epoch {epoch+1} — loss: {running_loss/len(train_loader):.4f}, time: {epoch_time:.1f}s")
+#     if config["save"]:
+#         torch.save(model.state_dict(), f"{folder}/model_epoch{epoch+1}.pt")
+#
+#
+# # In[33]:
+#
+#
+# # save results
+# if config["save"]:
+#     logger.save_results()
+#     torch.save(model.to(torch.float).state_dict(), f"{folder}/final_model.pt")
+#
+#
+# # In[ ]:
+#
+#
+# # test printout
+# print("Best validation performance:", best_val)
 
