@@ -232,6 +232,7 @@ for epoch in range(config["num_epochs"]):
 
         # val_perf = val_cgits if val_cgits > 0 else val_loss
         val_perf = val_its
+        print(f"The optimal required iterations in CG is {val_its}")
 
         if val_perf < best_val:
             if config["save"]:
