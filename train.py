@@ -94,10 +94,10 @@ config = {
     "save": True,
     "seed": 42,
     "n": 0,
-    "batch_size": 50,
+    "batch_size": 4,
     "num_epochs": 100,
     "dataset": "random",
-    "loss": "frobenius",
+    "loss": None,
     "gradient_clipping": 1.0,
     "regularizer": 0.0,
     "scheduler": False,
@@ -132,7 +132,6 @@ if config["save"]:
     save_dict_to_file(config, os.path.join(folder, "config.json"))
 
 
-# In[]: Training Process
 # global seed-ish
 torch_geometric.seed_everything(config["seed"])
 
