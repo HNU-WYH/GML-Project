@@ -256,5 +256,3 @@ if config["save"]:
 # wandb.run.summary["validation_chol"] = best_val
 print()
 print("Best validation loss:", best_val)
-
-

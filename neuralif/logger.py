@@ -246,7 +246,7 @@ class TrainResults:
         
     def save_results(self):
         fn = f"{self.folder}/training.npz"
-        np.savez(fn, loss=self.loss, grad_norm=self.grad_norm,
+        np.savez(fn, loss=self.loss, grad_norm=[i.detach().cpu().numpy() for i in self.grad_norm],
                  val_loss=self.val_loss, val_cond=self.val_its)
 
 
