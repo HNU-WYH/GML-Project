@@ -61,7 +61,7 @@ def get_dataloader(dataset, n=0, batch_size=1, spd=True, mode="train", size=None
     # Setup datasets
     
     if dataset == "random":
-        data = FolderDataset(f"./data/Random/{mode}/", n, size=size, graph=graph)
+        data = FolderDataset(f"./dataset/{mode}/", n, size=size, graph=graph)
     
     else:
         raise NotImplementedError("Dataset not implemented, Available: random")

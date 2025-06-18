@@ -24,9 +24,9 @@ def frobenius_loss(L, A, sparse=True):
         return torch.norm(r)
         
     else:
-        A = A.to_dense().squeeze()
-        L = L.to_dense().squeeze()
-        U = U.to_dense().squeeze()
+        A = A.cpu().to_dense().squeeze()
+        L = L.cpu().to_dense().squeeze()
+        U = U.cpu().to_dense().squeeze()
         
         return torch.linalg.norm(L@U - A, ord="fro")
 

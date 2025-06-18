@@ -5,6 +5,8 @@ import torch
 import torch_geometric
 import time
 
+from tqdm import tqdm
+
 from apps.data import get_dataloader, graph_to_matrix
 from Scalable_NeuralIF import NeuralIF, LearnedPreconditioner
 
@@ -18,7 +20,7 @@ from krylov.gmres import gmres
 # In[]: Validate Functiom
 @torch.no_grad()
 def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
-    """
+    r"""
     Evaluate the model on validation set.
     1. If solve = False, then compute the Frobenius norm of preconditioner and A.
     2. If solve = True, then compute the average iterations  of CG.
@@ -66,7 +68,7 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
             acc_solver_iters += len(l) - 1
 
         else:
-            """
+            r"""
             Here model is NeuralIF, the outputs are the matrix L, we compute the loss
                 \| LL^T - A \|^2_F
             """
@@ -92,7 +94,7 @@ config = {
     "save": True,
     "seed": 42,
     "n": 0,
-    "batch_size": 1,
+    "batch_size": 50,
     "num_epochs": 100,
     "dataset": "random",
     "loss": "frobenius",
@@ -114,11 +116,10 @@ config = {
     "graph_norm": False,
     "two_hop": False,
     "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
-    "device": "cpu"
+    "device": "cuda"
 }
 
 device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
-config[device] = device
 print(f"Using device: {device}")
 
 # Prepare output folder
@@ -148,8 +149,7 @@ gmres = False
 model = NeuralIF(**model_args)
 model.to(device)
 
-print(f"Number params in model: {count_parameters(model)}")
-print()
+print(f"Number params in model: {count_parameters(model)}/n")
 
 optimizer = torch.optim.AdamW(model.parameters())
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
@@ -176,7 +176,9 @@ for epoch in range(config["num_epochs"]):
 
     start_epoch = time.perf_counter()
 
-    for it, data in enumerate(train_loader):
+    print(f"Epoch: {epoch}")
+
+    for it, data in  enumerate(tqdm(train_loader, desc="Training", total=len(train_loader))):
         # increase iteration count
         total_it += 1
 
@@ -215,27 +217,27 @@ for epoch in range(config["num_epochs"]):
 
         logger.log(l.item(), grad_norm, time.perf_counter() - start)
 
-        # Do validation after 100 updates (to support big datasets)
-        # convergence is expected to be pretty fast...
-        if (total_it + 1) % 1000 == 0:
+    # Do validation after 100 updates (to support big datasets)
+    # convergence is expected to be pretty fast...
+    if (epoch + 1) % 10 == 0:
 
-            # start with cg-checks after 5 iterations
-            val_its = validate(model, validation_loader, solve=True,
-                               solver="gmres" if gmres else "cg")
+        # start with cg-checks after 5 iterations
+        val_its = validate(model, validation_loader, solve=True,
+                           solver="gmres" if gmres else "cg")
 
-            # use scheduler
-            # if config["scheduler"]:
-            #    scheduler.step(val_loss)
+        # use scheduler
+        # if config["scheduler"]:
+        #    scheduler.step(val_loss)
 
-            logger.log_val(None, val_its)
+        logger.log_val(None, val_its)
 
-            # val_perf = val_cgits if val_cgits > 0 else val_loss
-            val_perf = val_its
+        # val_perf = val_cgits if val_cgits > 0 else val_loss
+        val_perf = val_its
 
-            if val_perf < best_val:
-                if config["save"]:
-                    torch.save(model.state_dict(), f"{folder}/best_model.pt")
-                best_val = val_perf
+        if val_perf < best_val:
+            if config["save"]:
+                torch.save(model.state_dict(), f"{folder}/best_model.pt")
+            best_val = val_perf
 
     epoch_time = time.perf_counter() - start_epoch
 

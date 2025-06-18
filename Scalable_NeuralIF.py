@@ -41,25 +41,13 @@ from neuralif.utils import (
     condition_number, eigenval_distribution, gershgorin_norm,
     TwoHop
 )
+
 from neuralif.logger import TrainResults, TestResults
 from neuralif.loss import loss
 
 from krylov.cg import preconditioned_conjugate_gradient
 from krylov.gmres import gmres
-
 from numml.sparse import SparseCSRTensor
-
-# In[2]: Device Setting Up
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-# In[3]: Data Generation
-n = 10_000
-alpha = 10e-4
-
-create_dataset(n, 1000, alpha=alpha, mode='train', rs=0, graph=True, solution=True)
-create_dataset(n, 10, alpha=alpha, mode='val', rs=10000, graph=True, solution=True)
-create_dataset(n, 100, alpha=alpha, mode='test', rs=103600, graph=True, solution=True)
 
 # In[4]: Model
 class GraphNet(nn.Module):
@@ -843,75 +831,75 @@ def fb_solve(L, U, r, unit_lower=False, unit_upper=False):
 #         print(f"Validation loss: {avg_loss:.4f}")
 #         return avg_loss
 
-# In[14]:
-config = {
-    "name": "experiment_train",
-    "save": True,
-    "seed": 42,
-    "n": 0,
-    "batch_size": 1,
-    "num_epochs": 100,
-    "dataset": "random",
-    "loss": "frobenius",
-    "gradient_clipping": 1.0,
-    "regularizer": 0.0,
-    "scheduler": False,
-    "model": "neuralif",
-    "normalize": False,
-    "latent_size": 8,
-    "message_passing_steps": 3,
-    "decode_nodes": False,
-    "normalize_diag": False,
-    "aggregate": ["mean", "sum"],
-    "activation": "relu",
-    "skip_connections": True,
-    "augment_nodes": False,
-    "global_features": 0,
-    "edge_features": 1,
-    "graph_norm": False,
-    "two_hop": False,
-    "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
-    "device": "cpu"
-}
+# # In[14]:
+# config = {
+#     "name": "experiment_train",
+#     "save": True,
+#     "seed": 42,
+#     "n": 0,
+#     "batch_size": 1,
+#     "num_epochs": 100,
+#     "dataset": "random",
+#     "loss": "frobenius",
+#     "gradient_clipping": 1.0,
+#     "regularizer": 0.0,
+#     "scheduler": False,
+#     "model": "neuralif",
+#     "normalize": False,
+#     "latent_size": 8,
+#     "message_passing_steps": 3,
+#     "decode_nodes": False,
+#     "normalize_diag": False,
+#     "aggregate": ["mean", "sum"],
+#     "activation": "relu",
+#     "skip_connections": True,
+#     "augment_nodes": False,
+#     "global_features": 0,
+#     "edge_features": 1,
+#     "graph_norm": False,
+#     "two_hop": False,
+#     "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
+#     "device": "cpu"
+# }
+#
+# device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+# config[device] = device
 
-device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
-config[device] = device
-
-# Prepare output folder
-if config["name"]:
-    folder = f"results/{config['name']}"
-else:
-    folder = datetime.datetime.now().strftime("results/%Y-%m-%d_%H-%M-%S")
-if config["save"]:
-    os.makedirs(folder, exist_ok=True)
-    save_dict_to_file(config, os.path.join(folder, "config.json"))
+# # Prepare output folder
+# if config["name"]:
+#     folder = f"results/{config['name']}"
+# else:
+#     folder = datetime.datetime.now().strftime("results/%Y-%m-%d_%H-%M-%S")
+# if config["save"]:
+#     os.makedirs(folder, exist_ok=True)
+#     save_dict_to_file(config, os.path.join(folder, "config.json"))
 
 
-# In[16]:
-# Seed for reproducibility
-torch_geometric.seed_everything(config["seed"])
+# # In[16]:
+# # Seed for reproducibility
+# torch_geometric.seed_everything(config["seed"])
+#
+# # Select model
+# model_args = {k: config[k] for k in [
+#     "latent_size", "message_passing_steps", "skip_connections",
+#     "augment_nodes", "global_features", "decode_nodes",
+#     "normalize_diag", "activation", "aggregate", "graph_norm",
+#     "two_hop", "edge_features", "normalize"
+# ] if k in config}
 
-# Select model
-model_args = {k: config[k] for k in [
-    "latent_size", "message_passing_steps", "skip_connections",
-    "augment_nodes", "global_features", "decode_nodes",
-    "normalize_diag", "activation", "aggregate", "graph_norm",
-    "two_hop", "edge_features", "normalize"
-] if k in config}
-
-use_gmres = False
-if config["model"] in ("nif", "neuralif", "inf"):
-    model = NeuralIF(**model_args)
-else:
-    raise ValueError("Unknown model type")
-
-model.to(device)
-print("Number of parameters:", count_parameters(model))
-
-optimizer = torch.optim.AdamW(model.parameters())
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.5, patience=20
-)
+# use_gmres = False
+# if config["model"] in ("nif", "neuralif", "inf"):
+#     model = NeuralIF(**model_args)
+# else:
+#     raise ValueError("Unknown model type")
+#
+# model.to(device)
+# print("Number of parameters:", count_parameters(model))
+#
+# optimizer = torch.optim.AdamW(model.parameters())
+# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+#     optimizer, mode="min", factor=0.5, patience=20
+# )
 
 
 # ## Set DataLoader
