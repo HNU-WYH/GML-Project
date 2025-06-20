@@ -109,14 +109,14 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
 # In[]:
 # Configuration
 config = {
-    "name": "sage_train",
-    "sample_size": 1000,
+    "name": "sage_train_10000",
+    "sample_size": 10000,
     "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
     "save": True,
     "seed": 42,
     "n": 0,
     "batch_size": 64,
-    "num_epochs": 10,
+    "num_epochs": 101,
     "dataset": "random",
     "loss": None,
     "gradient_clipping": 1.0,
@@ -267,6 +267,7 @@ logger = TrainResults(folder)
 os.makedirs(folder, exist_ok=True)
 save_dict_to_file(config, os.path.join(folder, "config.json"))
 
+# In[]:
 for epoch in range(config["num_epochs"]):
     running_loss = 0.0
     grad_norm = 0.0
@@ -303,7 +304,7 @@ for epoch in range(config["num_epochs"]):
 
         logger.log(l.item(), grad_norm, time.perf_counter() - start_epoch)
 
-    if epoch % 10 == 0:
+    if (epoch+1) % 10 == 0:
         val_its = validate(model, validation_loader, solve=True,
                            solver="gmres" if gmres else "cg")
         logger.log_val(None, val_its)
