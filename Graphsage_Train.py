@@ -110,7 +110,7 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
 # Configuration
 config = {
     "name": "sage_train_10000",
-    "sample_size": 10000,
+    "sample_size": 1000,
     "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
     "save": True,
     "seed": 42,
@@ -164,11 +164,12 @@ class SubgraphSampler(IterableDataset):
                 num_neighbors=self.num_neighbors,
                 batch_size=self.sample_size,    # 每次采 sample_size 个 seed
                 shuffle=True,
+                directed=True,
+                # is_sorted=True,
+                transform=SortLocalByGlobal(),
             )
             for sub in loader:
-                # 保留全局节点数 & 原图节点 ID，便于后续还原完整矩阵
                 sub.full_n = lower_graph.num_nodes          # N of original graph
-                # sub.n_id 已自带局部→全局映射；另外存个别名更直观
                 sub.global_id = sub.n_id                   # LongTensor[|sub.nodes|]
                 yield sub
 
@@ -184,16 +185,40 @@ class ToSymmetric(torch_geometric.transforms.BaseTransform):
     把 data.edge_index / edge_attr 复制到上三角，使子图对称。
     """
     def __call__(self, lower):
+        full = lower.clone()
         ei, ea = torch_geometric.utils.to_undirected(
-            lower.edge_index,
-            lower.edge_attr,
+            full.edge_index,
+            full.edge_attr,
             reduce='mean'          # 重复边取平均；如需保留同值可用 'max'
         )
-        lower.edge_index, lower.edge_attr = ei, ea
-        return lower
+        full.edge_index, full.edge_attr = ei, ea
+        return full
+
+class SortLocalByGlobal(torch_geometric.transforms.BaseTransform):
+    r"""Re–index the sampled sub-graph so that local ids are in ascending
+    order of the original global ids."""
+    def __call__(self, data):
+        # 1. 取得全局 id 并排序
+        gidx = data.n_id          # = global_id, shape [tilde_N]
+        perm = torch.argsort(gidx)  # perm[i] = old_lid  →  new_lid = i
+
+        # 2. 重排节点特征及映射表
+        data.x          = data.x[perm]
+        data.n_id       = gidx[perm]        # now ascending
+        data.global_id  = data.n_id         # keep alias
+        # 若还有其它 node-level张量，同理 data.y = data.y[perm]
+
+        # 3. 构造 old→new 映射表，以便重映射 edge_index
+        inv_perm = torch.empty_like(perm)
+        inv_perm[perm] = torch.arange(perm.numel(), device=perm.device)
+
+        row, col = data.edge_index
+        data.edge_index = torch.stack(
+            [inv_perm[row], inv_perm[col]], dim=0)
+
+        return data
 
 # In[]: local to global matrix
-
 def local_to_global_sparse(local_L: torch.Tensor, batch_subgraph) -> torch.Tensor:
     """Convert a sparse matrix whose indices are *local* (0..tilde_N-1)
     to global indices (0..N-1).
@@ -267,6 +292,8 @@ logger = TrainResults(folder)
 os.makedirs(folder, exist_ok=True)
 save_dict_to_file(config, os.path.join(folder, "config.json"))
 
+sub = next(iter(train_loader))
+
 # In[]:
 for epoch in range(config["num_epochs"]):
     running_loss = 0.0
@@ -280,6 +307,7 @@ for epoch in range(config["num_epochs"]):
         sub = sub.to(device)
         sub = ToSymmetric()(sub)
         out, reg, _ = model(sub)
+
         l = loss(out, sub, c=reg, config=config["loss"])
         l.backward()
         running_loss += l.item()
