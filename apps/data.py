@@ -48,7 +48,7 @@ def graph_to_matrix(data:Data, normalize=False):
     :param normalize: bool, default false, if true then normalize the rhs vector b
     :return: torch.sparse_coo_tensor A and torch.tensor b
     """
-    A = torch.sparse_coo_tensor(data.edge_index, data.edge_attr[:, 0].squeeze(), requires_grad=False)
+    A = torch.sparse_coo_tensor(data.edge_index, data.edge_attr[:, 0].squeeze(), requires_grad=False, size=[data.x.size(0), data.x.size(0)])
     b = data.x[:, 0].squeeze()
 
     if normalize:

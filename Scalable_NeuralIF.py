@@ -165,7 +165,7 @@ class GraphNet(nn.Module):
                                                         x[row], x[col], edge_attr], dim=1))
             # 2. edge features -> aggregate -> message
             # where row denotes which node the edge_embedding should be sent to / destination
-            aggregation = self.aggregate(edge_embedding, row)
+            aggregation = self.aggregate(edge_embedding, row, dim_size=x.size(0))
 
             # 3. (global, node, message) -> MLP -> (new node feature)
             agg_features = torch.cat([torch.ones(x.shape[0], 1, device=x.device) * g, x, aggregation], dim=1)
@@ -187,7 +187,7 @@ class GraphNet(nn.Module):
             # 1. update edge features
             edge_embedding = self.edge_block(torch.cat([x[row], x[col], edge_attr], dim=1))
             # 2. aggregate the edge features
-            aggregation = self.aggregate(edge_embedding, row)
+            aggregation = self.aggregate(edge_embedding, row, dim_size=x.size(0))
             # 3. update node features
             agg_features = torch.cat([x, aggregation], dim=1)
             node_embeddings = self.node_block(agg_features)
