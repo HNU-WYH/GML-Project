@@ -116,6 +116,7 @@ config = {
     "n": 0,
     "num_epochs": 81,
     "sample_coverage": 2,
+    "batch_group_size": 4,
     "dataset": "random",
     "loss": None,
     "gradient_clipping": 1.0,
@@ -146,14 +147,18 @@ torch_geometric.seed_everything(config["seed"])
 
 # In[] Self-define sage sampler
 class SubgraphSampler(IterableDataset):
-    def __init__(self, graph_paths, sample_size, sample_coverage = 2, save_dir = r".\results\saint"):
+    def __init__(self, graph_paths, sample_size, batch_group_size=4,
+                 sample_coverage = 2, save_dir = r".\results\saint"):
         super().__init__()
         self.graph_paths   = graph_paths
         self.sample_size   = sample_size
+        self.batch_group_size = batch_group_size
         self.sample_coverage = sample_coverage
         self.cache_dir = save_dir
 
     def __iter__(self):
+        group = []
+
         for idx, path in enumerate(self.graph_paths):
             full_graph = torch.load(path, weights_only=False)
 
@@ -169,14 +174,21 @@ class SubgraphSampler(IterableDataset):
                 num_steps=num_steps,
                 save_dir=cache_dir,
             )
+
             for sub in loader:
-                yield sub
+                group.append(sub)
+                if len(group) >= self.batch_group_size:
+                    yield Batch.from_data_list(group)
+                    group = []
+
+        if len(group) > 0:
+            yield Batch.from_data_list(group)
 
     def __len__(self):
         return sum(
             (10000 // self.sample_size + 1)
             for _ in self.graph_paths
-        )
+        ) // self.batch_group_size
 
 class ToSymmetric(torch_geometric.transforms.BaseTransform):
     """
@@ -228,11 +240,12 @@ val_data     = Batch.from_data_list([torch.load(p, weights_only=False) for p in 
 validation_loader = get_dataloader(config["dataset"], config["n"], 1, spd=(not gmres), mode="val")
 
 # In[]: Parameter Analysis
-def run_experiment(batch_size):
+def run_experiment(batch_size, batch_group_size = 4):
     tag = f'bs{batch_size}'
     cfg = config.copy()
     cfg['sample_size'] = batch_size
     cfg['name'] = f"{config['name']}_{tag}"
+    cfg["batch_group_size"] = batch_group_size
 
     folder = f"results/{cfg['name']}"
     os.makedirs(folder, exist_ok=True)
@@ -246,6 +259,7 @@ def run_experiment(batch_size):
         sample_size=cfg["sample_size"],
         sample_coverage=cfg["sample_coverage"],
         save_dir=folder + '/saint_cache',
+        batch_group_size=cfg["batch_group_size"]
     )
     train_loader = DataLoader(subgraph_dataset, batch_size=None)
 
@@ -332,15 +346,19 @@ def run_experiment(batch_size):
         torch.save(model.to(torch.float).state_dict(), f"{folder}/final_model.pt")
 
     print("Best validation loss:", best_val)
-    return best_val
+    return best_val, epoch_time
 
 # In[] Main:
-BATCH_LIST = [256, 512, 1024, 2048, 4096]
+BATCH_LIST = [1000, 2000, 4000, 6000]
+GROUP_LIST = [40, 20, 10, 6]
 
 results = {}
-for bs in BATCH_LIST:
-    results[bs] = run_experiment(bs)
+epoch_times = {}
+for i in range(len(BATCH_LIST)):
+    bs = BATCH_LIST[i]
+    gs = GROUP_LIST[i]
+    results[bs], epoch_times[bs] = run_experiment(batch_size=bs, batch_group_size=gs)
 
 print("\n=== Summary ===")
 for bs, iters in results.items():
-    print(f"batch={bs:<5d}  best_iters={iters:.1f}")
+    print(f"batch={bs:<5d}  best_iters={iters:.1f} epoch_time = {epoch_times[bs]}")

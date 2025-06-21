@@ -198,3 +198,4 @@ cython_debug/
 /results/.idea
 /results/sage_train_10000
 /results/saint_train_4000
+/results/saint_graph_bs500
