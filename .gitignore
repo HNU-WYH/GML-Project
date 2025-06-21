@@ -193,4 +193,7 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /.idea
+
 /dataset
+/partition_cache
+/results/experiment_*/model_epoch*.pt
