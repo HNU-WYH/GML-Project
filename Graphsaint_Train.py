@@ -349,8 +349,8 @@ def run_experiment(batch_size, batch_group_size = 4):
     return best_val, epoch_time
 
 # In[] Main:
-BATCH_LIST = [1000, 2000, 4000, 6000]
-GROUP_LIST = [40, 20, 10, 6]
+BATCH_LIST = [500, 1000, 2000, 4000, 6000]
+GROUP_LIST = [80, 40, 20, 10, 6]
 
 results = {}
 epoch_times = {}
