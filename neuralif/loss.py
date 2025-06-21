@@ -31,9 +31,10 @@ def frobenius_loss(L, A, sparse=True):
         return torch.linalg.norm(L@U - A, ord="fro")
 
 
-def sketched_loss(L, A, c=None, normalized=False):
+def sketched_loss(L, A, c=None, normalized=False, node_norm = None):
     # both cholesky and LU decomposition
-    
+    A = A.to(L.device)
+
     if type(L) is tuple:
         U = L[1]
         L = L[0]
@@ -43,12 +44,15 @@ def sketched_loss(L, A, c=None, normalized=False):
     eps = 1e-8
     
     z = torch.randn((A.shape[0], 1), device=L.device)
-    
+
     # if normalized:
     # z = z / torch.linalg.norm(z) # z-vector also should have unit length
-    
-    est = L@(U@z) - A@z
-    norm = torch.linalg.vector_norm(est, ord=2) # vector norm
+    Mz = L @ (U @ z) - A @ z
+
+    if node_norm is not None:
+        norm = (Mz.squeeze().pow(2) * node_norm.squeeze()).sum()
+    else:
+        norm = torch.linalg.vector_norm(Mz, ord=2) # vector norm
     
     if normalized and c is None:
         norm = norm / torch.linalg.vector_norm(A@z, ord=2)
@@ -116,7 +120,10 @@ def loss(output, data, config=None, **kwargs):
     # compute loss
     if config is None:
         # this is the regular loss used to train NeuralIF
-        l = sketched_loss(output, A, normalized=False)
+        if "node_norm" in kwargs:
+            l = sketched_loss(output, A, normalized=False, node_norm = kwargs["node_norm"])
+        else:
+            l = sketched_loss(output, A, normalized=False)
     
     elif config == "normalized":
         l = sketched_loss(output, A, kwargs.get("c", None), normalized=True)

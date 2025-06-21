@@ -12,7 +12,7 @@ from apps.data import get_dataloader, graph_to_matrix, FolderDataset
 from Scalable_NeuralIF import NeuralIF, LearnedPreconditioner, ToLowerTriangular
 
 from torch.utils.data import IterableDataset, DataLoader
-from torch_geometric.loader import NeighborLoader
+from torch_geometric.loader import GraphSAINTNodeSampler
 from neuralif.utils import count_parameters, save_dict_to_file, condition_number, eigenval_distribution, gershgorin_norm
 from neuralif.logger import TrainResults, TestResults
 from neuralif.loss import loss
@@ -109,14 +109,13 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
 # In[]:
 # Configuration
 config = {
-    "name": "sage_train_10000",
-    "sample_size": 10000,
-    "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
+    "name": "saint_graph",
+    "sample_size": 4000,
     "save": True,
     "seed": 42,
     "n": 0,
-    "batch_size": 64,
-    "num_epochs": 101,
+    "num_epochs": 81,
+    "sample_coverage": 2,
     "dataset": "random",
     "loss": None,
     "gradient_clipping": 1.0,
@@ -147,37 +146,37 @@ torch_geometric.seed_everything(config["seed"])
 
 # In[] Self-define sage sampler
 class SubgraphSampler(IterableDataset):
-    def __init__(self, graph_paths, num_neighbors, sample_size):
+    def __init__(self, graph_paths, sample_size, sample_coverage = 2, save_dir = r".\results\saint"):
         super().__init__()
         self.graph_paths   = graph_paths
-        self.num_neighbors = num_neighbors
         self.sample_size   = sample_size
+        self.sample_coverage = sample_coverage
+        self.cache_dir = save_dir
 
     def __iter__(self):
-        for path in self.graph_paths:
+        for idx, path in enumerate(self.graph_paths):
             full_graph = torch.load(path, weights_only=False)
-            lower_graph = ToLowerTriangular()(full_graph)
 
-            loader = NeighborLoader(
-                data=lower_graph,
-                input_nodes=None,               # 全图节点均可做 seed
-                num_neighbors=self.num_neighbors,
+            num_steps = full_graph.num_nodes // self.sample_size + 1
+            cache_dir = os.path.join(self.cache_dir, f'graph_{idx}')
+            os.makedirs(cache_dir, exist_ok=True)
+
+            loader = GraphSAINTNodeSampler(
+                data=full_graph,
                 batch_size=self.sample_size,    # 每次采 sample_size 个 seed
                 shuffle=True,
+                sample_coverage=self.sample_coverage,
+                num_steps=num_steps,
+                save_dir=cache_dir,
             )
             for sub in loader:
-                # 保留全局节点数 & 原图节点 ID，便于后续还原完整矩阵
-                sub.full_n = lower_graph.num_nodes          # N of original graph
-                # sub.n_id 已自带局部→全局映射；另外存个别名更直观
-                sub.global_id = sub.n_id                   # LongTensor[|sub.nodes|]
                 yield sub
 
     def __len__(self):
-        total = 0
-        for p in self.graph_paths:
-            n = torch.load(p, weights_only=False).num_nodes
-            total += (n + self.sample_size - 1) // self.sample_size  # ceil
-        return total
+        return sum(
+            (torch.load(p, weights_only=False).num_nodes // self.sample_size + 1)
+            for p in self.graph_paths
+        )
 
 class ToSymmetric(torch_geometric.transforms.BaseTransform):
     """
@@ -220,117 +219,128 @@ def local_to_global_sparse(local_L: torch.Tensor, batch_subgraph) -> torch.Tenso
     full_n = int(batch_subgraph.full_n)
     return torch.sparse_coo_tensor(edge_idx_glob, local_L.values(), (full_n, full_n)).coalesce()
 
-# In[]: Train
+# In[]: Validation Data
 train_folder = "./dataset/train/"
 val_folder   = "./dataset/val/"
 train_paths  = FolderDataset(train_folder, n=config["n"], graph=True).files
 val_graphs   = FolderDataset(val_folder,   n=config["n"], graph=True)
 val_data     = Batch.from_data_list([torch.load(p, weights_only=False) for p in val_graphs.files])
-
-# Iterable loader — 一次只返回一个子图 Data 对象
-subgraph_dataset = SubgraphSampler(
-    graph_paths=train_paths,
-    num_neighbors=config["num_neighbors"],
-    sample_size=config["sample_size"],
-)
-train_loader = DataLoader(subgraph_dataset, batch_size=None)
 validation_loader = get_dataloader(config["dataset"], config["n"], 1, spd=(not gmres), mode="val")
-# --------------------------------------------------
-#  Model & Optimiser
-# --------------------------------------------------
-model = NeuralIF(
-    latent_size            = config["latent_size"],
-    message_passing_steps  = config["message_passing_steps"],
-    skip_connections       = config["skip_connections"],
-    augment_nodes          = config["augment_nodes"],
-    global_features        = config["global_features"],
-    decode_nodes           = config["decode_nodes"],
-    normalize_diag         = config["normalize_diag"],
-    activation             = config["activation"],
-    aggregate              = config["aggregate"],
-    two_hop                = config["two_hop"],
-    edge_features          = config["edge_features"],
-    graph_norm             = config["graph_norm"],
-).to(device)
-print("#Params:", count_parameters(model))
 
-optimizer = torch.optim.AdamW(model.parameters())
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
+# In[]: Parameter Analysis
+def run_experiment(batch_size):
+    tag = f'bs{batch_size}'
+    cfg = config.copy()
+    cfg['sample_size'] = batch_size
+    cfg['name'] = f"{config['name']}_{tag}"
 
-# --------------------------------------------------
-#  Training
-# --------------------------------------------------
-best_val = float("inf")
-folder = f"results/{config['name']}"
-logger = TrainResults(folder)
+    folder = f"results/{cfg['name']}"
+    os.makedirs(folder, exist_ok=True)
 
-os.makedirs(folder, exist_ok=True)
-save_dict_to_file(config, os.path.join(folder, "config.json"))
+    logger = TrainResults(folder)
+    save_dict_to_file(cfg, os.path.join(folder, "config.json"))
 
-# In[]:
-for epoch in range(config["num_epochs"]):
-    running_loss = 0.0
-    grad_norm = 0.0
+    # ==== Dataset & loader ====
+    subgraph_dataset = SubgraphSampler(
+        graph_paths=train_paths,
+        sample_size=cfg["sample_size"],
+        sample_coverage=cfg["sample_coverage"],
+        save_dir=folder + '/saint_cache',
+    )
+    train_loader = DataLoader(subgraph_dataset, batch_size=None)
 
-    start_epoch = time.perf_counter()
+    model = NeuralIF(
+        latent_size=cfg["latent_size"],
+        message_passing_steps=cfg["message_passing_steps"],
+        skip_connections=cfg["skip_connections"],
+        augment_nodes=cfg["augment_nodes"],
+        global_features=cfg["global_features"],
+        decode_nodes=cfg["decode_nodes"],
+        normalize_diag=cfg["normalize_diag"],
+        activation=cfg["activation"],
+        aggregate=cfg["aggregate"],
+        two_hop=cfg["two_hop"],
+        edge_features=cfg["edge_features"],
+        graph_norm=cfg["graph_norm"],
+    ).to(device)
+    print("#Params:", count_parameters(model))
 
-    model.train()
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
 
-    for sub in tqdm(train_loader, desc=f"Epoch {epoch+1}", total=len(train_loader)):
-        sub = sub.to(device)
-        sub = ToSymmetric()(sub)
-        out, reg, _ = model(sub)
-        l = loss(out, sub, c=reg, config=config["loss"])
-        l.backward()
-        running_loss += l.item()
+    best_val = float("inf")
+    for epoch in range(cfg["num_epochs"]):
+        running_loss = 0.0
+        grad_norm = 0.0
 
-        # track the gradient norm
-        if "gradient_clipping" in config and config["gradient_clipping"]:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
+        start_epoch = time.perf_counter()
 
-        else:
-            total_norm = 0.0
+        model.train()
 
-            for p in model.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.detach().data.norm(2)
-                    total_norm += param_norm.item() ** 2
+        for sub in tqdm(train_loader, desc=f"Epoch {epoch+1}", total=len(train_loader)):
+            sub = sub.to(device)
+            out, reg, _ = model(sub)
 
-            grad_norm = total_norm ** 0.5 / config["batch_size"]
+            l = loss(out, sub, c=reg, config=cfg["loss"], node_norm = sub.node_norm)
+            l.backward()
+            running_loss += l.item()
 
-        # update network parameters
-        optimizer.step()
-        optimizer.zero_grad()
+            # track the gradient norm
+            if "gradient_clipping" in cfg and cfg["gradient_clipping"]:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["gradient_clipping"])
 
-        logger.log(l.item(), grad_norm, time.perf_counter() - start_epoch)
+            else:
+                total_norm = 0.0
 
-    if (epoch+1) % 10 == 0:
-        val_its = validate(model, validation_loader, solve=True,
-                           solver="gmres" if gmres else "cg")
-        logger.log_val(None, val_its)
-        val_perf = val_its
-        print(f"The optimal required iterations in CG is {val_its}")
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.detach().data.norm(2)
+                        total_norm += param_norm.item() ** 2
 
-        if val_perf < best_val:
-            if config["save"]:
-                os.makedirs(folder, exist_ok=True)
-                torch.save(model.state_dict(), f"{folder}/best_model.pt")
-            best_val = val_perf
+                grad_norm = total_norm ** 0.5 / cfg["sample_size"]
 
-    epoch_time = time.perf_counter() - start_epoch
+            # update network parameters
+            optimizer.step()
+            optimizer.zero_grad()
 
-    # save model every epoch for analysis...
-    if config["save"]:
-        torch.save(model.state_dict(), f"{folder}/model_epoch{epoch + 1}.pt")
+            logger.log(l.item(), grad_norm, time.perf_counter() - start_epoch)
 
-    print(f"Epoch {epoch + 1} \t loss: {1 / len(train_loader) * running_loss} \t time: {epoch_time}")
+        if (epoch+1) % 10 == 0:
+            val_its = validate(model, validation_loader, solve=True,
+                               solver="gmres" if gmres else "cg")
+            logger.log_val(None, val_its)
+            val_perf = val_its
+            print(f"The optimal required iterations in CG is {val_its}")
 
-# save fully trained model
-if config["save"]:
-    logger.save_results()
-    torch.save(model.to(torch.float).state_dict(), f"{folder}/final_model.pt")
+            if val_perf < best_val:
+                if cfg["save"]:
+                    os.makedirs(folder, exist_ok=True)
+                    torch.save(model.state_dict(), f"{folder}/best_model.pt")
+                best_val = val_perf
 
-# Test the model
-# wandb.run.summary["validation_chol"] = best_val
-print()
-print("Best validation loss:", best_val)
+        epoch_time = time.perf_counter() - start_epoch
+
+        # save model every epoch for analysis...
+        if cfg["save"]:
+            torch.save(model.state_dict(), f"{folder}/model_epoch{epoch + 1}.pt")
+
+        print(f"Epoch {epoch + 1} \t loss: {1 / len(train_loader) * running_loss} \t time: {epoch_time}")
+
+    # save fully trained model
+    if cfg["save"]:
+        logger.save_results()
+        torch.save(model.to(torch.float).state_dict(), f"{folder}/final_model.pt")
+
+    print("Best validation loss:", best_val)
+    return best_val
+
+# In[] Main:
+BATCH_LIST = [256, 512, 1024, 2048, 4096]
+
+results = {}
+for bs in BATCH_LIST:
+    results[bs] = run_experiment(bs)
+
+print("\n=== Summary ===")
+for bs, iters in results.items():
+    print(f"batch={bs:<5d}  best_iters={iters:.1f}")
