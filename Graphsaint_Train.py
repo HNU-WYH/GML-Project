@@ -174,8 +174,8 @@ class SubgraphSampler(IterableDataset):
 
     def __len__(self):
         return sum(
-            (torch.load(p, weights_only=False).num_nodes // self.sample_size + 1)
-            for p in self.graph_paths
+            (10000 // self.sample_size + 1)
+            for _ in self.graph_paths
         )
 
 class ToSymmetric(torch_geometric.transforms.BaseTransform):
@@ -281,7 +281,7 @@ def run_experiment(batch_size):
             sub = sub.to(device)
             out, reg, _ = model(sub)
 
-            l = loss(out, sub, c=reg, config=cfg["loss"], node_norm = sub.node_norm)
+            l = loss(out, sub, config=cfg["loss"], c=reg,  node_norm = sub.node_norm)
             l.backward()
             running_loss += l.item()
 
