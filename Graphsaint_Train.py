@@ -109,12 +109,12 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
 # In[]:
 # Configuration
 config = {
-    "name": "saint_graph",
+    "name": "saint_graph_biased",
     "sample_size": 4000,
     "save": True,
     "seed": 42,
     "n": 0,
-    "num_epochs": 81,
+    "num_epochs": 51,
     "sample_coverage": 2,
     "batch_group_size": 4,
     "dataset": "random",
@@ -162,7 +162,7 @@ class SubgraphSampler(IterableDataset):
         for idx, path in enumerate(self.graph_paths):
             full_graph = torch.load(path, weights_only=False)
 
-            num_steps = full_graph.num_nodes // self.sample_size + 1
+            num_steps = full_graph.num_nodes // (self.sample_size+1) + 1
             cache_dir = os.path.join(self.cache_dir, f'graph_{idx}')
             os.makedirs(cache_dir, exist_ok=True)
 
@@ -170,9 +170,9 @@ class SubgraphSampler(IterableDataset):
                 data=full_graph,
                 batch_size=self.sample_size,    # 每次采 sample_size 个 seed
                 shuffle=True,
-                sample_coverage=self.sample_coverage,
+                sample_coverage=0, #self.sample_coverage,
                 num_steps=num_steps,
-                save_dir=cache_dir,
+                save_dir= None, #cache_dir,
             )
 
             for sub in loader:
@@ -186,7 +186,7 @@ class SubgraphSampler(IterableDataset):
 
     def __len__(self):
         return sum(
-            (10000 // self.sample_size + 1)
+            (10000 // (self.sample_size+1) + 1)
             for _ in self.graph_paths
         ) // self.batch_group_size
 
@@ -295,7 +295,7 @@ def run_experiment(batch_size, batch_group_size = 4):
             sub = sub.to(device)
             out, reg, _ = model(sub)
 
-            l = loss(out, sub, config=cfg["loss"], c=reg,  node_norm = sub.node_norm)
+            l = loss(out, sub, config=cfg["loss"], c=reg) #,  node_norm = sub.node_norm)
             l.backward()
             running_loss += l.item()
 
@@ -349,8 +349,8 @@ def run_experiment(batch_size, batch_group_size = 4):
     return best_val, epoch_time
 
 # In[] Main:
-BATCH_LIST = [2000, 4000, 6000, 1000]
-GROUP_LIST = [10, 5, 5, 20]
+BATCH_LIST = [10_000]
+GROUP_LIST = [3]
 
 results = {}
 epoch_times = {}
