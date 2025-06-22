@@ -7,6 +7,8 @@ import scipy.sparse
 import torch
 import json
 
+from tqdm import tqdm
+
 from krylov.cg import conjugate_gradient, preconditioned_conjugate_gradient
 from krylov.gmres import gmres
 from krylov.preconditioner import get_preconditioner
@@ -73,7 +75,7 @@ def load_checkpoint(model:NeuralIF, config, device):
 
         # intialize model and hyper-parameters in orginal cfg with minor revision
         model = model(**loaded_cfg)
-        print(f"load checkpoint: {checkpoint}")
+        print(f"load checkpoint from : {checkpoint}")
 
         model.load_state_dict(
             torch.load(checkpoint, weights_only=False, map_location=torch.device(device))
@@ -90,13 +92,13 @@ def load_checkpoint(model:NeuralIF, config, device):
             loaded_cfg["drop_tol"] = config["drop_tol"]
 
         model = model(**loaded_cfg)
-        print(f"load checkpoint: {checkpoint}")
         model.load_state_dict(
             torch.load(
                 checkpoint + f"/{config['weights']}.pt",
                 map_location=torch.device(device)
             )
         )
+        print(f"load checkpoint: {checkpoint}" + f"/{config['weights']}.pt")
     else:
         # do not load any weight file
         model = model(**{
@@ -146,14 +148,14 @@ def test(model, test_loader, device, folder, save_results=False, dataset="random
     :return:
     """
     if save_results:
-        os.makedirs(folder, exist_ok=False)
+        os.makedirs(folder, exist_ok=True)
 
     print(f"\nTest:\t{len(test_loader.dataset)} samples")
     print(f"Solver:\t{solver} solver\n")
 
     # Two modes: either test baselines or the learned preconditioner
     if model is None:
-        methods = ["baseline", "jacobi", "ilu"]
+        methods = ["ilu"] #["baseline", "jacobi", "ilu"]
     else:
         assert solver in ["cg", "gmres"], "Data-driven method only works with CG or GMRES"
         methods = ["learned"]
@@ -170,7 +172,7 @@ def test(model, test_loader, device, folder, save_results=False, dataset="random
                                    target=1e-6,
                                    solver=solver)
 
-        for sample, data in enumerate(test_loader):
+        for sample, data in tqdm(enumerate(test_loader), desc="Testing", total = test_loader.__len__()):
             plot = save_results and sample == (len(test_loader.dataset) - 1)
 
             # Getting the preconditioners
@@ -293,90 +295,36 @@ def test(model, test_loader, device, folder, save_results=False, dataset="random
 
         test_results.print_summary()
 
+base_config_path = "results/benchmark/config.json"
+with open(base_config_path) as f:
+    base_config = json.load(f)
+base_config = {**base_config}
 
+test_loader = get_dataloader(base_config["dataset"], base_config["n"], 1, spd=True, mode="test")
+model_name_list = [None, "benchmark", "saint_graph_bs500", "saint_graph_bs1000", "saint_graph_bs2000", "saint_graph_bs4000", "saint_graph_bs6000"]
 
-# argument is the model to load and the dataset to evaluate on
-def argparser():
-    parser = argparse.ArgumentParser()
+def run_test(base_config, model_name):
+    config = base_config.copy()
+    config["name"] = model_name
 
-    parser.add_argument("--name", type=str, default=None)
-    parser.add_argument("--device", type=int, required=False)
-
-    # select data driven model to run
-    parser.add_argument("--model", type=str, required=False, default="none")
-    parser.add_argument("--checkpoint", type=str, required=False)
-    parser.add_argument("--weights", type=str, required=False, default="model")
-    parser.add_argument("--drop_tol", type=float, default=0)
-
-    parser.add_argument("--solver", type=str, default="cg")
-
-    # select dataset and subset
-    parser.add_argument("--dataset", type=str, required=False, default="random")
-    parser.add_argument("--subset", type=str, required=False, default="test")
-    parser.add_argument("--n", type=int, required=False, default=0)
-    parser.add_argument("--samples", type=int, required=False, default=None)
-
-    # select if to save
-    parser.add_argument("--save", action='store_true', default=False)
-
-    return parser.parse_args()
-
-
-def main():
-    args = argparser()
-
-    if args.device is not None:
-        test_device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
+    device = "cpu" #torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+    model = None
+    if config.get("name") is not None:
+        folder = "results/" + config.get("name")
+        model = "neuralif"
+        print(f"Using device: {device}, Using model: {model}")
     else:
-        test_device = "cpu"
+        folder = "results/IC"
+        print(f"Using device: {device}, Using model: Incomplete Cholesky")
 
-    if args.name is not None:
-        folder = "results/" + args.name
-    else:
-        folder = folder = "results/" + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-    print()
-    print(f"Using device: {test_device}")
-    # torch.set_num_threads(1)
-
-    # Load the model
-    if args.model == "nif" or args.model == "neuralif":
-        print("Use model: NeuralIF")
-        model = NeuralIF
-
-    elif args.model == "lu" or args.model == "learnedlu":
-        print("Use model: LU")
-        model = LearnedLU
-
-        assert args.solver == "gmres", "LU only supports GMRES solver"
-
-    elif args.model == "neural_pcg" or args.model == "neuralpcg":
-        print("Use model: NeuralPCG")
-        model = NeuralPCG
-
-    elif args.model == "precondnet":
-        print("Use model: precondnet")
-        model = PreCondNet
-
-    elif args.model == "none":
-        print("Running non-data-driven baselines")
-        model = None
-
-    else:
-        raise NotImplementedError(f"Model {args.model} not available.")
-
+    config["drop_tol"] = 0
+    config["checkpoint"] = folder
+    config["weights"] = "final_model"
     if model is not None:
-        model = load_checkpoint(model, args, test_device)
-        warmup(model, test_device)
+        model = load_checkpoint(NeuralIF, config, device)
+        warmup(model, device)
 
-    spd = args.solver == "cg" or args.solver == "direct"
-    testdata_loader = get_dataloader(args.dataset, n=args.n, batch_size=1, mode=args.subset,
-                                     size=args.samples, spd=spd, graph=True)
+    test(model, test_loader, device, folder,
+         save_results=True, dataset="random", solver="cg")
 
-    # Evaluate the model
-    test(model, testdata_loader, test_device, folder,
-         save_results=args.save, dataset=args.dataset, solver=args.solver)
-
-
-if __name__ == "__main__":
-    main()
+run_test(base_config, "benchmark")

@@ -209,3 +209,4 @@ cython_debug/
 /results/benchmark
 /results/saint_graph_biased_bs10000
 /results/saint_graph_bs2000_pre
+/results/deprecated
