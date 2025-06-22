@@ -13,11 +13,11 @@ from krylov.cg import conjugate_gradient, preconditioned_conjugate_gradient
 from krylov.gmres import gmres
 from krylov.preconditioner import get_preconditioner
 
-from Scalable_NeuralIF import NeuralIF
+from Scalable_NeuralIF import NeuralIF, LearnedPreconditioner
 from neuralif.utils import torch_sparse_to_scipy, time_function
 from neuralif.logger import TestResults
 
-from apps.data import matrix_to_graph_sparse, get_dataloader
+from apps.data import matrix_to_graph_sparse, get_dataloader, graph_to_matrix
 
 # In[] help function:
 def load_checkpoint(model:NeuralIF, config, device):
@@ -179,7 +179,10 @@ def test(model, test_loader, device, folder, save_results=False, dataset="random
             start = time_function()
 
             data = data.to(device)
-            prec = get_preconditioner(data, method, model=model)
+
+            with torch.inference_mode():
+                prec = LearnedPreconditioner(data, model)
+            # prec = get_preconditioner(data, method, model=model)
 
             # Get properties...
             p_time = prec.time
@@ -188,11 +191,15 @@ def test(model, test_loader, device, folder, save_results=False, dataset="random
 
             stop = time_function()
 
-            A = torch.sparse_coo_tensor(data.edge_index, data.edge_attr.squeeze(),
-                                        dtype=torch.float64,
-                                        requires_grad=False).to("cpu").to_sparse_csr()
+            A, b = graph_to_matrix(data)
+            A = A.to("cpu").to(torch.float64)
+            b = b.to("cpu").to(torch.float64)
 
-            b = data.x[:, 0].squeeze().to("cpu").to(torch.float64)
+            # A = torch.sparse_coo_tensor(data.edge_index, data.edge_attr.squeeze(),
+            #                             dtype=torch.float64,
+            #                             requires_grad=False).to("cpu").to_sparse_csr()
+            # b = data.x[:, 0].squeeze().to("cpu").to(torch.float64)
+
             b_norm = torch.linalg.norm(b)
 
             # we assume that b is unit norm wlog
@@ -327,4 +334,5 @@ def run_test(base_config, model_name):
     test(model, test_loader, device, folder,
          save_results=True, dataset="random", solver="cg")
 
-run_test(base_config, "benchmark")
+for model_name in model_name_list:
+    run_test(base_config, model_name)
