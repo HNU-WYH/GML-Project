@@ -109,7 +109,7 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
 # In[]:
 # Configuration
 config = {
-    "name": "saint_graph_biased",
+    "name": "saint_graph",
     "sample_size": 4000,
     "save": True,
     "seed": 42,
@@ -170,9 +170,9 @@ class SubgraphSampler(IterableDataset):
                 data=full_graph,
                 batch_size=self.sample_size,    # 每次采 sample_size 个 seed
                 shuffle=True,
-                sample_coverage=0, #self.sample_coverage,
+                sample_coverage= self.sample_coverage,
                 num_steps=num_steps,
-                save_dir= None, #cache_dir,
+                save_dir= cache_dir,
             )
 
             for sub in loader:
@@ -295,7 +295,7 @@ def run_experiment(batch_size, batch_group_size = 4):
             sub = sub.to(device)
             out, reg, _ = model(sub)
 
-            l = loss(out, sub, config=cfg["loss"], c=reg) #,  node_norm = sub.node_norm)
+            l = loss(out, sub, config=cfg["loss"], c=reg,  node_norm=sub.node_norm)
             l.backward()
             running_loss += l.item()
 
@@ -349,8 +349,8 @@ def run_experiment(batch_size, batch_group_size = 4):
     return best_val, epoch_time
 
 # In[] Main:
-BATCH_LIST = [10_000]
-GROUP_LIST = [3]
+BATCH_LIST = [2000, 10000]
+GROUP_LIST = [10, 2]
 
 results = {}
 epoch_times = {}

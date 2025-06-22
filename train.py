@@ -90,12 +90,12 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
 
 # In[]: Config Definition
 config = {
-    "name": "experiment_train",
+    "name": "benchmark",
     "save": True,
     "seed": 42,
     "n": 0,
     "batch_size": 4,
-    "num_epochs": 100,
+    "num_epochs": 51,
     "dataset": "random",
     "loss": None,
     "gradient_clipping": 1.0,
@@ -115,7 +115,7 @@ config = {
     "edge_features": 1,
     "graph_norm": False,
     "two_hop": False,
-    "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
+    # "num_neighbors": [15, 10],  # number of neighbours to sample in each hop (GraphSAGE sampling)
     "device": "cuda"
 }
 
